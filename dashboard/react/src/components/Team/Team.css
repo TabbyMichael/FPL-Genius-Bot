@@ -1,0 +1,148 @@
+.pitch {
+  background-color: #04f770;
+  width: 500px;
+  height: 600px;
+  position: relative;
+  border: 2px solid #f2f2f2;
+  color: #fff;
+  margin: 0 auto; /* Center the pitch */
+}
+
+.pitch-lines {
+  position: absolute;
+  width: 100%;
+  height: 100%;
+}
+
+.pitch-line-top,
+.pitch-line-bottom,
+.pitch-line-left,
+.pitch-line-right,
+.pitch-line-middle {
+  position: absolute;
+  background-color: #f2f2f2;
+}
+
+/* Boundary lines */
+.pitch-line-top {
+  top: 5%;
+  left: 5%;
+  width: 90%;
+  height: 1px;
+}
+
+.pitch-line-bottom {
+  bottom: 5%;
+  left: 5%;
+  width: 90%;
+  height: 1px;
+}
+
+.pitch-line-left {
+  top: 5%;
+  left: 5%;
+  width: 1px;
+  height: 90%;
+}
+
+.pitch-line-right {
+  top: 5%;
+  right: 5%;
+  width: 1px;
+  height: 90%;
+}
+
+/* Middle line */
+.pitch-line-middle {
+  top: 50%;
+  left: 5%;
+  width: 90%;
+  height: 1px;
+}
+
+.pitch-circle-middle {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    width: 80px;
+    height: 80px;
+    border: 1px solid #f2f2f2;
+    border-radius: 50%;
+}
+
+.pitch-penalty-box-left,
+.pitch-penalty-box-right {
+    position: absolute;
+    border: 1px solid #f2f2f2;
+}
+
+/* Penalty box at the top */
+.pitch-penalty-box-left {
+    top: 5%;
+    left: 20%;
+    width: 60%;
+    height: 20%;
+}
+
+/* Penalty box at the bottom */
+.pitch-penalty-box-right {
+    bottom: 5%;
+    left: 20%;
+    width: 60%;
+    height: 20%;
+}
+
+.team-formation {
+    position: absolute;
+    width: 100%;
+    height: 100%;
+    display: flex;
+    flex-direction: column; /* Original */
+    justify-content: space-around;
+}
+
+.team-row {
+    display: flex;
+    justify-content: space-around; /* Original */
+}
+
+.player {
+  text-align: center;
+}
+
+.player-shirt {
+  width: 40px;
+  height: 40px;
+  background-color: #d00000;
+  margin: 0 auto;
+  border: 1px solid #fff;
+}
+
+.player-info {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background-color: #eee;
+  border-radius: 3px;
+  padding: 2px;
+  min-width: 70px;
+}
+
+.player-name {
+  background-color: transparent;
+  color: #000;
+  font-size: 12px;
+  padding: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.player-points {
+    background-color: #000;
+    color: #fff;
+    font-size: 10px;
+    padding: 2px 4px;
+    border-radius: 3px;
+}

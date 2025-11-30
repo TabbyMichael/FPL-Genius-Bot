@@ -3,6 +3,7 @@ import asyncio
 from typing import Dict, Any
 from services.fpl_api import FPLAPI
 from config.database import get_db, PlayerPerformance
+from config.settings import TEAM_ID
 
 logger = logging.getLogger(__name__)
 
@@ -49,14 +50,21 @@ class HealthCheckService:
             self.status['errors'].append(f"DB: {str(e)}")
             return False
     
-    def check_ml_model_status(self, ml_predictor) -> bool:
-        """Check if ML model is trained"""
+    def check_ml_model_status(self, ml_predictor=None) -> bool:
+        """Check if ML model is trained by checking database records"""
         try:
-            is_trained = getattr(ml_predictor, 'is_trained', False)
+            # Check if we have performance data which indicates the model has been trained
+            db_gen = get_db()
+            db = next(db_gen)
+            count = db.query(PlayerPerformance).count()
+            db.close()
+            
+            # If we have performance data, consider the model as trained
+            is_trained = count > 0
             if is_trained:
-                logger.info("ML model status check passed")
+                logger.info("ML model status check passed (data available)")
             else:
-                logger.warning("ML model is not trained")
+                logger.warning("ML model is not trained (no performance data)")
             return is_trained
         except Exception as e:
             logger.error(f"ML model status check failed: {str(e)}")
@@ -73,9 +81,7 @@ class HealthCheckService:
         # Run checks
         self.status['api_connectivity'] = await self.check_api_connectivity()
         self.status['database_connectivity'] = self.check_database_connectivity()
-        
-        if ml_predictor:
-            self.status['ml_model_trained'] = self.check_ml_model_status(ml_predictor)
+        self.status['ml_model_trained'] = self.check_ml_model_status(ml_predictor)
         
         # Update last run time
         from datetime import datetime

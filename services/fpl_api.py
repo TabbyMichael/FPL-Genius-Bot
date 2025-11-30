@@ -27,7 +27,12 @@ class FPLAPI:
         self.session_id = session_id
         self.csrf_token = csrf_token
         self.team_id = team_id
-    
+        
+        # Session management
+        self.last_auth_time = None
+        self.session_expires_in = 3600  # 1 hour default
+        self.min_session_time = 300  # 5 minutes minimum before expiration check
+        
     async def __aenter__(self):
         # Create session with timeout and retry settings
         connector = aiohttp.TCPConnector(limit=10, limit_per_host=5, ttl_dns_cache=300)
@@ -95,6 +100,18 @@ class FPLAPI:
                                 self._cache_response(url, result)
                             log_api_call(url, method, response.status)
                             return result
+                        elif response.status == 401:  # Unauthorized
+                            logger.warning("Unauthorized access, trying to re-authenticate...")
+                            log_api_call(url, method, response.status)
+                            if await self._authenticate():
+                                # Retry the request with authenticated session
+                                if self.authenticated_session:
+                                    async with self.authenticated_session.get(url, **kwargs) as retry_response:
+                                        if retry_response.status == 200:
+                                            result = await retry_response.json()
+                                            log_api_call(url, method, retry_response.status)
+                                            return result
+                            return None
                         elif response.status == 429:  # Rate limited
                             logger.warning(f"Rate limited, waiting {retry_delay * backoff_factor} seconds...")
                             log_api_call(url, method, response.status)
@@ -224,6 +241,28 @@ class FPLAPI:
         logger.error(f"All retry attempts failed for {url}. Last error: {last_exception}")
         return None
     
+    async def _is_session_expired(self) -> bool:
+        """Check if the current session has expired or is about to expire"""
+        if not self.last_auth_time:
+            return True
+            
+        # Check if session has expired or will expire soon
+        time_since_auth = time.time() - self.last_auth_time
+        return time_since_auth > (self.session_expires_in - self.min_session_time)
+    
+    async def _is_session_valid(self) -> bool:
+        """Check if the current session is still valid by making a test request"""
+        if not self.authenticated_session:
+            return False
+            
+        try:
+            # Make a simple request to check session validity
+            url = f"{FPL_BASE_URL}/entry/{self.team_id}/" if self.team_id else f"{FPL_BASE_URL}/bootstrap-static/"
+            async with self.authenticated_session.get(url) as response:
+                return response.status == 200
+        except Exception:
+            return False
+    
     async def _authenticate(self):
         """Authenticate with FPL using either traditional login or session cookies"""
         try:
@@ -245,6 +284,7 @@ class FPLAPI:
                         'Referer': 'https://fantasy.premierleague.com/'
                     }
                 )
+                self.last_auth_time = time.time()
                 log_authentication_attempt(True, "session")
                 return True
             
@@ -259,6 +299,7 @@ class FPLAPI:
                     connector=connector,
                     headers={'User-Agent': 'FPL-Bot/1.0'}
                 )
+                self.last_auth_time = time.time()
                 # In a real implementation, we would perform the login here
                 log_authentication_attempt(True, "traditional")
                 return True
@@ -270,6 +311,20 @@ class FPLAPI:
             logger.error(f"Authentication failed: {str(e)}")
             log_authentication_attempt(False, "error")
             return False
+    
+    async def _ensure_authenticated(self) -> bool:
+        """Ensure we have a valid authenticated session, refreshing if necessary"""
+        # Check if we have an authenticated session
+        if not self.authenticated_session:
+            logger.info("No authenticated session found, creating new one")
+            return await self._authenticate()
+        
+        # Check if session is about to expire or is invalid
+        if await self._is_session_expired() or not await self._is_session_valid():
+            logger.info("Session expired or invalid, refreshing")
+            return await self._authenticate()
+        
+        return True
     
     async def get_bootstrap_data(self):
         """Get static bootstrap data from FPL"""
@@ -307,6 +362,11 @@ class FPLAPI:
             return None
             
         try:
+            # Ensure we have a valid authenticated session
+            if not await self._ensure_authenticated():
+                logger.error("Failed to authenticate for team data")
+                return None
+            
             url = f"{FPL_BASE_URL}/entry/{self.team_id}/"
             return await self._make_request_with_retry(url)
         except Exception as e:
@@ -320,6 +380,11 @@ class FPLAPI:
             return None
             
         try:
+            # Ensure we have a valid authenticated session
+            if not await self._ensure_authenticated():
+                logger.error("Failed to authenticate for team picks")
+                return None
+            
             # If no gameweek specified, try to get current gameweek
             if gameweek is None:
                 bootstrap_data = await self.get_bootstrap_data()
@@ -407,17 +472,21 @@ class FPLAPI:
             return {'status': 'a', 'news': '', 'chance_of_playing_next_round': 100, 'chance_of_playing_this_round': 100}
     
     async def execute_transfers(self, transfers):
-        """Execute transfers in FPL"""
+        """Execute transfers in FPL with proper error handling and retry mechanisms"""
         if not self.team_id:
             logger.error("No TEAM_ID configured")
             return False
             
         try:
             # Ensure we're authenticated
-            if not self.authenticated_session:
-                if not await self._authenticate():
-                    logger.error("Failed to authenticate for transfer execution")
-                    return False
+            if not await self._ensure_authenticated():
+                logger.error("Failed to authenticate for transfer execution")
+                return False
+            
+            # Validate transfers
+            if not transfers or not isinstance(transfers, list):
+                logger.error("Invalid transfers data provided")
+                return False
             
             # Prepare transfer payload
             transfer_payload = {
@@ -437,24 +506,59 @@ class FPLAPI:
             }
             
             # Try to execute transfers with authenticated session
-            if self.authenticated_session:
-                async with self.authenticated_session.post(url, json=transfer_payload, headers=headers) as response:
-                    if response.status == 200:
-                        result = await response.json()
-                        logger.info(f"Transfers executed successfully: {result}")
-                        # Log transfer execution
-                        for transfer in transfers:
-                            # Import here to avoid circular imports
-                            from utils.security import log_transfer_execution
-                            log_transfer_execution(
-                                transfer.get('element_out', 0),
-                                transfer.get('element_in', 0),
-                                True
-                            )
-                        return True
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    if self.authenticated_session:
+                        async with self.authenticated_session.post(url, json=transfer_payload, headers=headers) as response:
+                            if response.status == 200:
+                                result = await response.json()
+                                logger.info(f"Transfers executed successfully: {result}")
+                                # Log transfer execution
+                                for transfer in transfers:
+                                    # Import here to avoid circular imports
+                                    from utils.security import log_transfer_execution
+                                    log_transfer_execution(
+                                        transfer.get('element_out', 0),
+                                        transfer.get('element_in', 0),
+                                        True
+                                    )
+                                return True
+                            elif response.status == 401:  # Unauthorized
+                                logger.warning("Unauthorized during transfer execution, re-authenticating...")
+                                if await self._authenticate():
+                                    if attempt < max_retries - 1:
+                                        continue  # Retry after re-authentication
+                                else:
+                                    logger.error("Failed to re-authenticate for transfer execution")
+                                    # Log failed transfer execution
+                                    for transfer in transfers:
+                                        # Import here to avoid circular imports
+                                        from utils.security import log_transfer_execution
+                                        log_transfer_execution(
+                                            transfer.get('element_out', 0),
+                                            transfer.get('element_in', 0),
+                                            False
+                                        )
+                                    return False
+                            else:
+                                error_text = await response.text()
+                                logger.error(f"Failed to execute transfers. Status: {response.status}, Error: {error_text}")
+                                # Log failed transfer execution
+                                for transfer in transfers:
+                                    # Import here to avoid circular imports
+                                    from utils.security import log_transfer_execution
+                                    log_transfer_execution(
+                                        transfer.get('element_out', 0),
+                                        transfer.get('element_in', 0),
+                                        False
+                                    )
+                                if attempt < max_retries - 1:
+                                    await asyncio.sleep(2 ** attempt)  # Exponential backoff
+                                    continue
+                                return False
                     else:
-                        error_text = await response.text()
-                        logger.error(f"Failed to execute transfers. Status: {response.status}, Error: {error_text}")
+                        logger.error("No authenticated session available for transfer execution")
                         # Log failed transfer execution
                         for transfer in transfers:
                             # Import here to avoid circular imports
@@ -465,9 +569,23 @@ class FPLAPI:
                                 False
                             )
                         return False
-            else:
-                logger.error("No authenticated session available for transfer execution")
-                return False
+                except Exception as e:
+                    logger.error(f"Error executing transfers (attempt {attempt + 1}): {str(e)}")
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(2 ** attempt)  # Exponential backoff
+                        continue
+                    # Log failed transfer execution due to exception
+                    for transfer in transfers:
+                        # Import here to avoid circular imports
+                        from utils.security import log_transfer_execution
+                        log_transfer_execution(
+                            transfer.get('element_out', 0),
+                            transfer.get('element_in', 0),
+                            False
+                        )
+                    return False
+            
+            return False  # All retries exhausted
                 
         except Exception as e:
             logger.error(f"Error executing transfers: {str(e)}")

@@ -1,0 +1,34 @@
+import axios from 'axios';
+
+const API_BASE_URL = 'http://localhost:8000';
+
+const api = axios.create({
+  baseURL: API_BASE_URL,
+  timeout: 10000,
+});
+
+export const fetchHealthStatus = () => {
+  return api.get('/health');
+};
+
+export const fetchTeamInfo = () => {
+  return api.get('/team/info');
+};
+
+export const fetchPerformanceHistory = (limit = 50) => {
+  return api.get(`/performance/history?limit=${limit}`);
+};
+
+export const fetchLatestPredictions = (limit = 50) => {
+  return api.get(`/predictions/latest?limit=${limit}`);
+};
+
+export const fetchTransferHistory = (limit = 50) => {
+  return api.get(`/transfers/history?limit=${limit}`);
+};
+
+export const fetchAnalyticsSummary = () => {
+  return api.get('/analytics/summary');
+};
+
+export default api;
