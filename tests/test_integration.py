@@ -23,18 +23,16 @@ async def test_fpl_api_authentication():
         mock_post_context.__aenter__.return_value = mock_response
         mock_session.post.return_value = mock_post_context
         
-        async with FPLAPI() as api:
-            # Set session cookies
-            with patch('config.settings.SESSION_ID', 'test_session_id'), \
-                 patch('config.settings.CSRF_TOKEN', 'test_csrf_token'):
-                result = await api._authenticate()
-                assert result is True
+        # Create FPLAPI with session credentials directly
+        async with FPLAPI(session_id='test_session_id', csrf_token='test_csrf_token') as api:
+            result = await api._authenticate()
+            assert result is True
 
 @pytest.mark.asyncio
 async def test_transfer_execution():
     """Test transfer execution functionality"""
     # We'll test the FPLAPI execute_transfers method directly
-    async with FPLAPI() as api:
+    async with FPLAPI(team_id='123456') as api:
         # Mock authentication
         with patch.object(api, '_authenticate', return_value=True):
             # Create a mock authenticated session

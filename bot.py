@@ -4,7 +4,7 @@ import logging
 from datetime import datetime
 from typing import List, Dict, Any
 from sqlalchemy.orm import Session
-from config.settings import FPL_USERNAME, FPL_PASSWORD, TEAM_ID
+from config.settings import FPL_USERNAME, FPL_PASSWORD, SESSION_ID, CSRF_TOKEN, TEAM_ID
 from config.database import get_db, PlayerPerformance
 from services.fpl_api import FPLAPI
 from services.transfer_engine import TransferEngine
@@ -179,7 +179,14 @@ async def run_weekly_process():
     db_gen = get_db()
     db = next(db_gen)
     
-    async with FPLAPI() as api:
+    # Initialize FPL API with configuration parameters
+    async with FPLAPI(
+        username=FPL_USERNAME,
+        password=FPL_PASSWORD,
+        session_id=SESSION_ID,
+        csrf_token=CSRF_TOKEN,
+        team_id=TEAM_ID
+    ) as api:
         # 1. Run health checks first
         logger.info("Running health checks...")
         health_status = await health_service.run_health_checks()
