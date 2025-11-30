@@ -1,9 +1,25 @@
 version: '3.8'
 
 services:
+  # Database initialization service (runs once)
+  init-db:
+    build: .
+    container_name: fpl-init-db
+    command: python init_db.py
+    environment:
+      - DATABASE_URL=sqlite:///./fpl_bot.db
+    volumes:
+      - ./fpl_bot.db:/app/fpl_bot.db
+    networks:
+      - fpl-network
+
+  # Main FPL bot service
   fpl-bot:
     build: .
     container_name: fpl-bot
+    depends_on:
+      init-db:
+        condition: service_completed_successfully
     environment:
       - FPL_USERNAME=${FPL_USERNAME}
       - FPL_PASSWORD=${FPL_PASSWORD}
@@ -15,6 +31,40 @@ services:
     volumes:
       - ./logs:/app/logs
       - ./fpl_bot.db:/app/fpl_bot.db
+    restart: unless-stopped
+    networks:
+      - fpl-network
+
+  # FastAPI dashboard backend
+  dashboard-api:
+    build: .
+    container_name: fpl-dashboard-api
+    depends_on:
+      init-db:
+        condition: service_completed_successfully
+    command: python -m uvicorn dashboard.main:app --host 0.0.0.0 --port 8000
+    environment:
+      - DATABASE_URL=sqlite:///./fpl_bot.db
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./fpl_bot.db:/app/fpl_bot.db
+    restart: unless-stopped
+    networks:
+      - fpl-network
+
+  # React dashboard frontend
+  dashboard-react:
+    build:
+      context: .
+      dockerfile: Dockerfile.react
+    container_name: fpl-dashboard-react
+    depends_on:
+      - dashboard-api
+    ports:
+      - "3000:3000"
+    environment:
+      - REACT_APP_API_URL=http://localhost:8000
     restart: unless-stopped
     networks:
       - fpl-network
@@ -34,22 +84,8 @@ services:
     restart: unless-stopped
     networks:
       - fpl-network
-
-  # Web dashboard for monitoring (to be implemented)
-  dashboard:
-    build:
-      context: .
-      dockerfile: Dockerfile.dashboard
-    container_name: fpl-dashboard
-    ports:
-      - "8000:8000"
-    depends_on:
-      - fpl-bot
-    environment:
-      - DATABASE_URL=postgresql://fpl_user:fpl_password@postgres:5432/fpl_bot
-    restart: unless-stopped
-    networks:
-      - fpl-network
+    profiles:
+      - postgres
 
 volumes:
   postgres_data:

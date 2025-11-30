@@ -1,0 +1,20 @@
+# Use Node.js 18 alpine image as base
+FROM node:18-alpine
+
+# Set working directory
+WORKDIR /app
+
+# Copy package files
+COPY dashboard/react/package.json dashboard/react/package-lock.json ./
+
+# Install dependencies
+RUN npm install
+
+# Copy React app source
+COPY dashboard/react/ .
+
+# Expose port for React app
+EXPOSE 3000
+
+# Start the React development server
+CMD ["npm", "start"]

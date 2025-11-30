@@ -31,8 +31,8 @@ RUN useradd --create-home --shell /bin/bash app \
     && chown -R app:app /app
 USER app
 
-# Expose port for web interface (if needed)
+# Expose port for web interface
 EXPOSE 8000
 
-# Command to run the bot
+# Default command - will be overridden in docker-compose
 CMD ["python", "bot.py"]
