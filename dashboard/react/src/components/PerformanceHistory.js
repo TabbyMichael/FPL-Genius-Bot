@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { fetchPerformanceHistory } from '../services/api';
-import Field from './Team/Field';
+import PerformanceHistoryTable from './PerformanceHistoryTable';
 
 const PerformanceHistory = () => {
   const [performances, setPerformances] = useState([]);
@@ -36,10 +36,7 @@ const PerformanceHistory = () => {
     <div>
       <h1>Performance History</h1>
       
-      <div className="dashboard-card">
-        <h2>Fantasy Team</h2>
-        <Field players={performances} />
-      </div>
+      <PerformanceHistoryTable performances={performances} />
     </div>
   );
 
