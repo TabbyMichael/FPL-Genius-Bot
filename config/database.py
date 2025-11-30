@@ -1,8 +1,13 @@
 import os
+import time
+import logging
 from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Boolean
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from dotenv import load_dotenv
+
+# Configure logging
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -14,6 +19,36 @@ DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./fpl_bot.db")
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False} if "sqlite" in DATABASE_URL else {})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
+
+# Simple in-memory cache for database queries
+_query_cache = {}
+_cache_ttl = 300  # 5 minutes
+
+def cached_query(ttl=300):
+    """Decorator to cache database query results"""
+    def decorator(func):
+        def wrapper(*args, **kwargs):
+            # Create a cache key based on function name and arguments
+            cache_key = f"{func.__name__}:{hash(str(args) + str(kwargs))}"
+            current_time = time.time()
+            
+            # Check if we have a cached result that hasn't expired
+            if cache_key in _query_cache:
+                result, timestamp = _query_cache[cache_key]
+                if current_time - timestamp < ttl:
+                    logger.debug(f"Cache hit for {func.__name__}")
+                    return result
+                else:
+                    # Remove expired cache entry
+                    del _query_cache[cache_key]
+            
+            # Execute the function and cache the result
+            result = func(*args, **kwargs)
+            _query_cache[cache_key] = (result, current_time)
+            logger.debug(f"Cached result for {func.__name__}")
+            return result
+        return wrapper
+    return decorator
 
 # Database models
 class PlayerPerformance(Base):
@@ -72,3 +107,9 @@ def get_db():
         yield db
     finally:
         db.close()
+
+def clear_query_cache():
+    """Clear the query cache"""
+    global _query_cache
+    _query_cache.clear()
+    logger.debug("Query cache cleared")

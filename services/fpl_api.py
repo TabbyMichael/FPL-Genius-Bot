@@ -1,7 +1,9 @@
 import aiohttp
 import asyncio
 import logging
+import time
 from config.settings import FPL_BASE_URL, FPL_USERNAME, FPL_PASSWORD, TEAM_ID, SESSION_ID, CSRF_TOKEN
+from utils.security import log_api_call, log_authentication_attempt
 
 logger = logging.getLogger(__name__)
 
@@ -13,6 +15,9 @@ class FPLAPI:
         self.authenticated_session = None
         # Set default timeout
         self.timeout = aiohttp.ClientTimeout(total=30)
+        # Cache for storing API responses
+        self._cache = {}
+        self._cache_ttl = 300  # 5 minutes cache TTL
     
     async def __aenter__(self):
         # Create session with timeout and retry settings
@@ -29,33 +34,88 @@ class FPLAPI:
             await self.session.close()
         if self.authenticated_session:
             await self.authenticated_session.close()
+        # Clear cache
+        self._cache.clear()
     
-    async def _make_request_with_retry(self, url, method='GET', **kwargs):
+    def _is_cached(self, url):
+        """Check if URL response is cached and not expired"""
+        if url in self._cache:
+            cached_data, timestamp = self._cache[url]
+            if time.time() - timestamp < self._cache_ttl:
+                logger.debug(f"Cache hit for {url}")
+                return True, cached_data
+            else:
+                # Remove expired cache entry
+                del self._cache[url]
+        return False, None
+    
+    def _cache_response(self, url, response):
+        """Cache API response"""
+        self._cache[url] = (response, time.time())
+        logger.debug(f"Cached response for {url}")
+    
+    async def _make_request_with_retry(self, url, method='GET', cacheable=False, **kwargs):
         """Make HTTP request with retry logic"""
-        max_retries = 3
+        max_retries = 5  # Increased retries
         retry_delay = 1  # seconds
+        backoff_factor = 2  # Exponential backoff factor
+        
+        # Check cache first for GET requests
+        if method.upper() == 'GET' and cacheable:
+            is_cached, cached_response = self._is_cached(url)
+            if is_cached:
+                log_api_call(url, method, 200)  # Log cached response as 200
+                return cached_response
         
         # Check if session exists
         if not self.session:
             logger.error("No active session")
+            log_api_call(url, method, None)
             return None
+        
+        last_exception = None
         
         for attempt in range(max_retries):
             try:
                 if method.upper() == 'GET':
                     async with self.session.get(url, **kwargs) as response:
                         if response.status == 200:
-                            return await response.json()
+                            result = await response.json()
+                            # Cache the response if it's cacheable
+                            if cacheable:
+                                self._cache_response(url, result)
+                            log_api_call(url, method, response.status)
+                            return result
                         elif response.status == 429:  # Rate limited
-                            logger.warning(f"Rate limited, waiting {retry_delay * 2} seconds...")
-                            await asyncio.sleep(retry_delay * 2)
-                            retry_delay *= 2
+                            logger.warning(f"Rate limited, waiting {retry_delay * backoff_factor} seconds...")
+                            log_api_call(url, method, response.status)
+                            await asyncio.sleep(retry_delay * backoff_factor)
+                            retry_delay *= backoff_factor
+                            continue
+                        elif response.status == 500:  # Server error, retry with backoff
+                            logger.warning(f"Server error (500), retrying in {retry_delay} seconds...")
+                            log_api_call(url, method, response.status)
+                            await asyncio.sleep(retry_delay)
+                            retry_delay *= backoff_factor
+                            continue
+                        elif response.status == 502:  # Bad gateway, retry with backoff
+                            logger.warning(f"Bad gateway (502), retrying in {retry_delay} seconds...")
+                            log_api_call(url, method, response.status)
+                            await asyncio.sleep(retry_delay)
+                            retry_delay *= backoff_factor
+                            continue
+                        elif response.status == 503:  # Service unavailable, retry with backoff
+                            logger.warning(f"Service unavailable (503), retrying in {retry_delay} seconds...")
+                            log_api_call(url, method, response.status)
+                            await asyncio.sleep(retry_delay)
+                            retry_delay *= backoff_factor
                             continue
                         else:
                             logger.error(f"HTTP {response.status} for {url}")
+                            log_api_call(url, method, response.status)
                             if attempt < max_retries - 1:
                                 await asyncio.sleep(retry_delay)
-                                retry_delay *= 2
+                                retry_delay *= backoff_factor
                                 continue
                             return None
                 elif method.upper() == 'POST':
@@ -63,47 +123,96 @@ class FPLAPI:
                     session_to_use = self.authenticated_session if self.authenticated_session else self.session
                     async with session_to_use.post(url, **kwargs) as response:
                         if response.status == 200:
-                            return await response.json()
+                            result = await response.json()
+                            log_api_call(url, method, response.status)
+                            return result
                         elif response.status == 401:  # Unauthorized
                             logger.warning("Unauthorized access, trying to re-authenticate...")
+                            log_api_call(url, method, response.status)
                             if await self._authenticate():
                                 # Retry the request with authenticated session
                                 if self.authenticated_session:
                                     async with self.authenticated_session.post(url, **kwargs) as retry_response:
                                         if retry_response.status == 200:
-                                            return await retry_response.json()
+                                            result = await retry_response.json()
+                                            log_api_call(url, method, retry_response.status)
+                                            return result
                             return None
                         elif response.status == 429:  # Rate limited
-                            logger.warning(f"Rate limited, waiting {retry_delay * 2} seconds...")
-                            await asyncio.sleep(retry_delay * 2)
-                            retry_delay *= 2
+                            logger.warning(f"Rate limited, waiting {retry_delay * backoff_factor} seconds...")
+                            log_api_call(url, method, response.status)
+                            await asyncio.sleep(retry_delay * backoff_factor)
+                            retry_delay *= backoff_factor
+                            continue
+                        elif response.status == 500:  # Server error, retry with backoff
+                            logger.warning(f"Server error (500), retrying in {retry_delay} seconds...")
+                            log_api_call(url, method, response.status)
+                            await asyncio.sleep(retry_delay)
+                            retry_delay *= backoff_factor
+                            continue
+                        elif response.status == 502:  # Bad gateway, retry with backoff
+                            logger.warning(f"Bad gateway (502), retrying in {retry_delay} seconds...")
+                            log_api_call(url, method, response.status)
+                            await asyncio.sleep(retry_delay)
+                            retry_delay *= backoff_factor
+                            continue
+                        elif response.status == 503:  # Service unavailable, retry with backoff
+                            logger.warning(f"Service unavailable (503), retrying in {retry_delay} seconds...")
+                            log_api_call(url, method, response.status)
+                            await asyncio.sleep(retry_delay)
+                            retry_delay *= backoff_factor
                             continue
                         else:
                             logger.error(f"HTTP {response.status} for {url}")
+                            log_api_call(url, method, response.status)
                             if attempt < max_retries - 1:
                                 await asyncio.sleep(retry_delay)
-                                retry_delay *= 2
+                                retry_delay *= backoff_factor
                                 continue
                             return None
                 else:
                     logger.error(f"Unsupported HTTP method: {method}")
+                    log_api_call(url, method, None)
                     return None
                     
             except asyncio.TimeoutError:
                 logger.warning(f"Timeout on attempt {attempt + 1} for {url}")
+                last_exception = "Timeout"
+                log_api_call(url, method, None)
                 if attempt < max_retries - 1:
                     await asyncio.sleep(retry_delay)
-                    retry_delay *= 2
+                    retry_delay *= backoff_factor
+                    continue
+                return None
+            except aiohttp.ClientConnectorError as e:
+                logger.warning(f"Connection error on attempt {attempt + 1} for {url}: {str(e)}")
+                last_exception = str(e)
+                log_api_call(url, method, None)
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(retry_delay)
+                    retry_delay *= backoff_factor
+                    continue
+                return None
+            except aiohttp.ClientResponseError as e:
+                logger.warning(f"Response error on attempt {attempt + 1} for {url}: {str(e)}")
+                last_exception = str(e)
+                log_api_call(url, method, e.status)
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(retry_delay)
+                    retry_delay *= backoff_factor
                     continue
                 return None
             except Exception as e:
-                logger.error(f"Error on attempt {attempt + 1} for {url}: {str(e)}")
+                logger.error(f"Unexpected error on attempt {attempt + 1} for {url}: {str(e)}")
+                last_exception = str(e)
+                log_api_call(url, method, None)
                 if attempt < max_retries - 1:
                     await asyncio.sleep(retry_delay)
-                    retry_delay *= 2
+                    retry_delay *= backoff_factor
                     continue
                 return None
         
+        logger.error(f"All retry attempts failed for {url}. Last error: {last_exception}")
         return None
     
     async def _authenticate(self):
@@ -127,6 +236,7 @@ class FPLAPI:
                         'Referer': 'https://fantasy.premierleague.com/'
                     }
                 )
+                log_authentication_attempt(True, "session")
                 return True
             
             # Fallback to traditional username/password authentication
@@ -141,19 +251,23 @@ class FPLAPI:
                     headers={'User-Agent': 'FPL-Bot/1.0'}
                 )
                 # In a real implementation, we would perform the login here
+                log_authentication_attempt(True, "traditional")
                 return True
             
             logger.warning("No authentication credentials provided")
+            log_authentication_attempt(False, "none")
             return False
         except Exception as e:
             logger.error(f"Authentication failed: {str(e)}")
+            log_authentication_attempt(False, "error")
             return False
     
     async def get_bootstrap_data(self):
         """Get static bootstrap data from FPL"""
         try:
             url = f"{FPL_BASE_URL}/bootstrap-static/"
-            return await self._make_request_with_retry(url)
+            # Bootstrap data is cacheable since it doesn't change frequently
+            return await self._make_request_with_retry(url, cacheable=True)
         except Exception as e:
             logger.error(f"Error fetching bootstrap data: {str(e)}")
             return None
@@ -171,7 +285,8 @@ class FPLAPI:
         """Get upcoming fixtures"""
         try:
             url = f"{FPL_BASE_URL}/fixtures/"
-            return await self._make_request_with_retry(url)
+            # Fixtures can be cached for a short period
+            return await self._make_request_with_retry(url, cacheable=True)
         except Exception as e:
             logger.error(f"Error fetching fixtures: {str(e)}")
             return None
@@ -318,10 +433,28 @@ class FPLAPI:
                     if response.status == 200:
                         result = await response.json()
                         logger.info(f"Transfers executed successfully: {result}")
+                        # Log transfer execution
+                        for transfer in transfers:
+                            # Import here to avoid circular imports
+                            from utils.security import log_transfer_execution
+                            log_transfer_execution(
+                                transfer.get('element_out', 0),
+                                transfer.get('element_in', 0),
+                                True
+                            )
                         return True
                     else:
                         error_text = await response.text()
                         logger.error(f"Failed to execute transfers. Status: {response.status}, Error: {error_text}")
+                        # Log failed transfer execution
+                        for transfer in transfers:
+                            # Import here to avoid circular imports
+                            from utils.security import log_transfer_execution
+                            log_transfer_execution(
+                                transfer.get('element_out', 0),
+                                transfer.get('element_in', 0),
+                                False
+                            )
                         return False
             else:
                 logger.error("No authenticated session available for transfer execution")
@@ -329,4 +462,13 @@ class FPLAPI:
                 
         except Exception as e:
             logger.error(f"Error executing transfers: {str(e)}")
+            # Log failed transfer execution due to exception
+            for transfer in transfers:
+                # Import here to avoid circular imports
+                from utils.security import log_transfer_execution
+                log_transfer_execution(
+                    transfer.get('element_out', 0),
+                    transfer.get('element_in', 0),
+                    False
+                )
             return False
