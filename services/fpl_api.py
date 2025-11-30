@@ -3,10 +3,16 @@ import asyncio
 import logging
 import time
 from typing import Optional
+from playwright.async_api import async_playwright
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from config.settings import FPL_BASE_URL
 from utils.security import log_api_call, log_authentication_attempt
 
 logger = logging.getLogger(__name__)
+
+# Define custom exception for retryable HTTP errors
+class RetryableAPIError(Exception):
+    pass
 
 class FPLAPI:
     """Handles communication with the FPL API"""
@@ -34,7 +40,7 @@ class FPLAPI:
         self.min_session_time = 300  # 5 minutes minimum before expiration check
         
     async def __aenter__(self):
-        # Create session with timeout and retry settings
+        # Create session with timeout settings
         connector = aiohttp.TCPConnector(limit=10, limit_per_host=5, ttl_dns_cache=300)
         self.session = aiohttp.ClientSession(
             timeout=self.timeout,
@@ -68,178 +74,70 @@ class FPLAPI:
         self._cache[url] = (response, time.time())
         logger.debug(f"Cached response for {url}")
     
-    async def _make_request_with_retry(self, url, method='GET', cacheable=False, **kwargs):
-        """Make HTTP request with retry logic"""
-        max_retries = 5  # Increased retries
-        retry_delay = 1  # seconds
-        backoff_factor = 2  # Exponential backoff factor
-        
+    @retry(
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=1, min=2, max=60),
+        retry=retry_if_exception_type((RetryableAPIError, asyncio.TimeoutError, aiohttp.ClientConnectorError)),
+        reraise=True  # Reraise the exception after all retries fail
+    )
+    async def _make_request_with_retry(self, url, method='GET', cacheable=False, authenticated=False, **kwargs):
+        """Make HTTP request with tenacity retry logic"""
         # Check cache first for GET requests
         if method.upper() == 'GET' and cacheable:
             is_cached, cached_response = self._is_cached(url)
             if is_cached:
                 log_api_call(url, method, 200)  # Log cached response as 200
                 return cached_response
-        
-        # Check if session exists
-        if not self.session:
-            logger.error("No active session")
-            log_api_call(url, method, 0)  # Use 0 to indicate no connection
+
+        # Determine which session to use
+        if authenticated:
+            if not await self._ensure_authenticated():
+                logger.error("Authentication required but failed.")
+                log_api_call(url, method, 401)
+                return None
+            session_to_use = self.authenticated_session
+        else:
+            session_to_use = self.session
+
+        if not session_to_use:
+            logger.error("No active session available.")
+            log_api_call(url, method, 0)
             return None
-        
-        last_exception = None
-        
-        for attempt in range(max_retries):
-            try:
-                if method.upper() == 'GET':
-                    async with self.session.get(url, **kwargs) as response:
-                        if response.status == 200:
-                            result = await response.json()
-                            # Cache the response if it's cacheable
-                            if cacheable:
-                                self._cache_response(url, result)
-                            log_api_call(url, method, response.status)
-                            return result
-                        elif response.status == 401:  # Unauthorized
-                            logger.warning("Unauthorized access, trying to re-authenticate...")
-                            log_api_call(url, method, response.status)
-                            if await self._authenticate():
-                                # Retry the request with authenticated session
-                                if self.authenticated_session:
-                                    async with self.authenticated_session.get(url, **kwargs) as retry_response:
-                                        if retry_response.status == 200:
-                                            result = await retry_response.json()
-                                            log_api_call(url, method, retry_response.status)
-                                            return result
-                            return None
-                        elif response.status == 429:  # Rate limited
-                            logger.warning(f"Rate limited, waiting {retry_delay * backoff_factor} seconds...")
-                            log_api_call(url, method, response.status)
-                            await asyncio.sleep(retry_delay * backoff_factor)
-                            retry_delay *= backoff_factor
-                            continue
-                        elif response.status == 500:  # Server error, retry with backoff
-                            logger.warning(f"Server error (500), retrying in {retry_delay} seconds...")
-                            log_api_call(url, method, response.status)
-                            await asyncio.sleep(retry_delay)
-                            retry_delay *= backoff_factor
-                            continue
-                        elif response.status == 502:  # Bad gateway, retry with backoff
-                            logger.warning(f"Bad gateway (502), retrying in {retry_delay} seconds...")
-                            log_api_call(url, method, response.status)
-                            await asyncio.sleep(retry_delay)
-                            retry_delay *= backoff_factor
-                            continue
-                        elif response.status == 503:  # Service unavailable, retry with backoff
-                            logger.warning(f"Service unavailable (503), retrying in {retry_delay} seconds...")
-                            log_api_call(url, method, response.status)
-                            await asyncio.sleep(retry_delay)
-                            retry_delay *= backoff_factor
-                            continue
-                        else:
-                            logger.error(f"HTTP {response.status} for {url}")
-                            log_api_call(url, method, response.status)
-                            if attempt < max_retries - 1:
-                                await asyncio.sleep(retry_delay)
-                                retry_delay *= backoff_factor
-                                continue
-                            return None
-                elif method.upper() == 'POST':
-                    # Use authenticated session for POST requests if available
-                    session_to_use = self.authenticated_session if self.authenticated_session else self.session
-                    async with session_to_use.post(url, **kwargs) as response:
-                        if response.status == 200:
-                            result = await response.json()
-                            log_api_call(url, method, response.status)
-                            return result
-                        elif response.status == 401:  # Unauthorized
-                            logger.warning("Unauthorized access, trying to re-authenticate...")
-                            log_api_call(url, method, response.status)
-                            if await self._authenticate():
-                                # Retry the request with authenticated session
-                                if self.authenticated_session:
-                                    async with self.authenticated_session.post(url, **kwargs) as retry_response:
-                                        if retry_response.status == 200:
-                                            result = await retry_response.json()
-                                            log_api_call(url, method, retry_response.status)
-                                            return result
-                            return None
-                        elif response.status == 429:  # Rate limited
-                            logger.warning(f"Rate limited, waiting {retry_delay * backoff_factor} seconds...")
-                            log_api_call(url, method, response.status)
-                            await asyncio.sleep(retry_delay * backoff_factor)
-                            retry_delay *= backoff_factor
-                            continue
-                        elif response.status == 500:  # Server error, retry with backoff
-                            logger.warning(f"Server error (500), retrying in {retry_delay} seconds...")
-                            log_api_call(url, method, response.status)
-                            await asyncio.sleep(retry_delay)
-                            retry_delay *= backoff_factor
-                            continue
-                        elif response.status == 502:  # Bad gateway, retry with backoff
-                            logger.warning(f"Bad gateway (502), retrying in {retry_delay} seconds...")
-                            log_api_call(url, method, response.status)
-                            await asyncio.sleep(retry_delay)
-                            retry_delay *= backoff_factor
-                            continue
-                        elif response.status == 503:  # Service unavailable, retry with backoff
-                            logger.warning(f"Service unavailable (503), retrying in {retry_delay} seconds...")
-                            log_api_call(url, method, response.status)
-                            await asyncio.sleep(retry_delay)
-                            retry_delay *= backoff_factor
-                            continue
-                        else:
-                            logger.error(f"HTTP {response.status} for {url}")
-                            log_api_call(url, method, response.status)
-                            if attempt < max_retries - 1:
-                                await asyncio.sleep(retry_delay)
-                                retry_delay *= backoff_factor
-                                continue
-                            return None
+
+        try:
+            async with session_to_use.request(method, url, **kwargs) as response:
+                log_api_call(url, method, response.status)
+
+                if response.status == 200:
+                    result = await response.json()
+                    if method.upper() == 'GET' and cacheable:
+                        self._cache_response(url, result)
+                    return result
+                elif response.status == 401:  # Unauthorized
+                    logger.warning("Unauthorized access, attempting to re-authenticate...")
+                    if await self._authenticate():
+                        # After re-authentication, retry the request
+                        raise RetryableAPIError("Re-authentication successful, retrying request.")
+                    else:
+                        logger.error("Re-authentication failed.")
+                        return None
+                elif response.status in [429, 500, 502, 503]:  # Retryable server errors
+                    logger.warning(f"Received status {response.status}, retrying...")
+                    raise RetryableAPIError(f"HTTP {response.status}")
                 else:
-                    logger.error(f"Unsupported HTTP method: {method}")
-                    log_api_call(url, method, 0)  # Use 0 for unsupported method
+                    logger.error(f"HTTP {response.status} for {url}")
                     return None
-                    
-            except asyncio.TimeoutError:
-                logger.warning(f"Timeout on attempt {attempt + 1} for {url}")
-                last_exception = "Timeout"
-                log_api_call(url, method, 0)  # Use 0 for timeout
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(retry_delay)
-                    retry_delay *= backoff_factor
-                    continue
-                return None
-            except aiohttp.ClientConnectorError as e:
-                logger.warning(f"Connection error on attempt {attempt + 1} for {url}: {str(e)}")
-                last_exception = str(e)
-                log_api_call(url, method, 0)  # Use 0 for connection error
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(retry_delay)
-                    retry_delay *= backoff_factor
-                    continue
-                return None
-            except aiohttp.ClientResponseError as e:
-                logger.warning(f"Response error on attempt {attempt + 1} for {url}: {str(e)}")
-                last_exception = str(e)
-                log_api_call(url, method, e.status if e.status else 0)
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(retry_delay)
-                    retry_delay *= backoff_factor
-                    continue
-                return None
-            except Exception as e:
-                logger.error(f"Unexpected error on attempt {attempt + 1} for {url}: {str(e)}")
-                last_exception = str(e)
-                log_api_call(url, method, 0)  # Use 0 for unexpected error
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(retry_delay)
-                    retry_delay *= backoff_factor
-                    continue
-                return None
-        
-        logger.error(f"All retry attempts failed for {url}. Last error: {last_exception}")
-        return None
+        except (asyncio.TimeoutError, aiohttp.ClientConnectorError) as e:
+            logger.warning(f"Connection error for {url}: {e}")
+            log_api_call(url, method, 0)
+            raise  # Re-raise to be caught by tenacity for retry
+        except RetryableAPIError:
+            # Let tenacity handle this specific error for retries
+            raise
+        except Exception as e:
+            logger.error(f"Unexpected error for {url}: {e}")
+            log_api_call(url, method, 0)
+            return None
     
     async def _is_session_expired(self) -> bool:
         """Check if the current session has expired or is about to expire"""
@@ -291,18 +189,43 @@ class FPLAPI:
             # Fallback to traditional username/password authentication
             elif self.username and self.password:
                 logger.info("Using traditional authentication")
-                # Note: This is a simplified implementation
-                # Real implementation would need to handle the full login flow
-                connector = aiohttp.TCPConnector(limit=10, limit_per_host=5, ttl_dns_cache=300)
-                self.authenticated_session = aiohttp.ClientSession(
-                    timeout=self.timeout,
-                    connector=connector,
-                    headers={'User-Agent': 'FPL-Bot/1.0'}
-                )
-                self.last_auth_time = time.time()
-                # In a real implementation, we would perform the login here
-                log_authentication_attempt(True, "traditional")
-                return True
+                async with async_playwright() as p:
+                    browser = await p.chromium.launch(headless=True)
+                    page = await browser.new_page()
+                    await page.goto(f"{FPL_BASE_URL}/")
+                    await page.fill('input[name="login"]', self.username)
+                    await page.fill('input[name="password"]', self.password)
+                    await page.click('button[type="submit"]')
+                    await page.wait_for_load_state('networkidle')
+                    cookies = await page.context.cookies()
+                    await browser.close()
+
+                for cookie in cookies:
+                    if cookie['name'] == 'sessionid':
+                        self.session_id = cookie['value']
+                    if cookie['name'] == 'csrftoken':
+                        self.csrf_token = cookie['value']
+
+                if self.session_id and self.csrf_token:
+                    logger.info("Successfully retrieved session cookies")
+                    connector = aiohttp.TCPConnector(limit=10, limit_per_host=5, ttl_dns_cache=300)
+                    self.authenticated_session = aiohttp.ClientSession(
+                        timeout=self.timeout,
+                        connector=connector,
+                        headers={
+                            'User-Agent': 'FPL-Bot/1.0',
+                            'Cookie': f'sessionid={self.session_id}; csrftoken={self.csrf_token}',
+                            'X-CSRFToken': self.csrf_token,
+                            'Referer': 'https://fantasy.premierleague.com/'
+                        }
+                    )
+                    self.last_auth_time = time.time()
+                    log_authentication_attempt(True, "traditional")
+                    return True
+                else:
+                    logger.error("Failed to retrieve session cookies")
+                    log_authentication_attempt(False, "traditional")
+                    return False
             
             logger.warning("No authentication credentials provided")
             log_authentication_attempt(False, "none")
@@ -362,13 +285,8 @@ class FPLAPI:
             return None
             
         try:
-            # Ensure we have a valid authenticated session
-            if not await self._ensure_authenticated():
-                logger.error("Failed to authenticate for team data")
-                return None
-            
             url = f"{FPL_BASE_URL}/entry/{self.team_id}/"
-            return await self._make_request_with_retry(url)
+            return await self._make_request_with_retry(url, authenticated=True)
         except Exception as e:
             logger.error(f"Error fetching team data for ID {self.team_id}: {str(e)}")
             return None
@@ -380,11 +298,6 @@ class FPLAPI:
             return None
             
         try:
-            # Ensure we have a valid authenticated session
-            if not await self._ensure_authenticated():
-                logger.error("Failed to authenticate for team picks")
-                return None
-            
             # If no gameweek specified, try to get current gameweek
             if gameweek is None:
                 bootstrap_data = await self.get_bootstrap_data()
