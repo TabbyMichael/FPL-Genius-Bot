@@ -2,7 +2,8 @@ import aiohttp
 import asyncio
 import logging
 import time
-from config.settings import FPL_BASE_URL, FPL_USERNAME, FPL_PASSWORD, TEAM_ID, SESSION_ID, CSRF_TOKEN
+from typing import Optional
+from config.settings import FPL_BASE_URL
 from utils.security import log_api_call, log_authentication_attempt
 
 logger = logging.getLogger(__name__)
@@ -10,7 +11,8 @@ logger = logging.getLogger(__name__)
 class FPLAPI:
     """Handles communication with the FPL API"""
     
-    def __init__(self):
+    def __init__(self, username: Optional[str] = None, password: Optional[str] = None, 
+                 session_id: Optional[str] = None, csrf_token: Optional[str] = None, team_id: Optional[str] = None):
         self.session = None
         self.authenticated_session = None
         # Set default timeout
@@ -18,6 +20,13 @@ class FPLAPI:
         # Cache for storing API responses
         self._cache = {}
         self._cache_ttl = 300  # 5 minutes cache TTL
+        
+        # Account credentials
+        self.username = username
+        self.password = password
+        self.session_id = session_id
+        self.csrf_token = csrf_token
+        self.team_id = team_id
     
     async def __aenter__(self):
         # Create session with timeout and retry settings
@@ -70,7 +79,7 @@ class FPLAPI:
         # Check if session exists
         if not self.session:
             logger.error("No active session")
-            log_api_call(url, method, None)
+            log_api_call(url, method, 0)  # Use 0 to indicate no connection
             return None
         
         last_exception = None
@@ -172,13 +181,13 @@ class FPLAPI:
                             return None
                 else:
                     logger.error(f"Unsupported HTTP method: {method}")
-                    log_api_call(url, method, None)
+                    log_api_call(url, method, 0)  # Use 0 for unsupported method
                     return None
                     
             except asyncio.TimeoutError:
                 logger.warning(f"Timeout on attempt {attempt + 1} for {url}")
                 last_exception = "Timeout"
-                log_api_call(url, method, None)
+                log_api_call(url, method, 0)  # Use 0 for timeout
                 if attempt < max_retries - 1:
                     await asyncio.sleep(retry_delay)
                     retry_delay *= backoff_factor
@@ -187,7 +196,7 @@ class FPLAPI:
             except aiohttp.ClientConnectorError as e:
                 logger.warning(f"Connection error on attempt {attempt + 1} for {url}: {str(e)}")
                 last_exception = str(e)
-                log_api_call(url, method, None)
+                log_api_call(url, method, 0)  # Use 0 for connection error
                 if attempt < max_retries - 1:
                     await asyncio.sleep(retry_delay)
                     retry_delay *= backoff_factor
@@ -196,7 +205,7 @@ class FPLAPI:
             except aiohttp.ClientResponseError as e:
                 logger.warning(f"Response error on attempt {attempt + 1} for {url}: {str(e)}")
                 last_exception = str(e)
-                log_api_call(url, method, e.status)
+                log_api_call(url, method, e.status if e.status else 0)
                 if attempt < max_retries - 1:
                     await asyncio.sleep(retry_delay)
                     retry_delay *= backoff_factor
@@ -205,7 +214,7 @@ class FPLAPI:
             except Exception as e:
                 logger.error(f"Unexpected error on attempt {attempt + 1} for {url}: {str(e)}")
                 last_exception = str(e)
-                log_api_call(url, method, None)
+                log_api_call(url, method, 0)  # Use 0 for unexpected error
                 if attempt < max_retries - 1:
                     await asyncio.sleep(retry_delay)
                     retry_delay *= backoff_factor
@@ -223,7 +232,7 @@ class FPLAPI:
                 await self.authenticated_session.close()
             
             # Prefer session-based authentication if available (for Google Sign-In)
-            if SESSION_ID and CSRF_TOKEN:
+            if self.session_id and self.csrf_token:
                 logger.info("Using session-based authentication")
                 connector = aiohttp.TCPConnector(limit=10, limit_per_host=5, ttl_dns_cache=300)
                 self.authenticated_session = aiohttp.ClientSession(
@@ -231,8 +240,8 @@ class FPLAPI:
                     connector=connector,
                     headers={
                         'User-Agent': 'FPL-Bot/1.0',
-                        'Cookie': f'sessionid={SESSION_ID}; csrftoken={CSRF_TOKEN}',
-                        'X-CSRFToken': CSRF_TOKEN,
+                        'Cookie': f'sessionid={self.session_id}; csrftoken={self.csrf_token}',
+                        'X-CSRFToken': self.csrf_token,
                         'Referer': 'https://fantasy.premierleague.com/'
                     }
                 )
@@ -240,7 +249,7 @@ class FPLAPI:
                 return True
             
             # Fallback to traditional username/password authentication
-            elif FPL_USERNAME and FPL_PASSWORD:
+            elif self.username and self.password:
                 logger.info("Using traditional authentication")
                 # Note: This is a simplified implementation
                 # Real implementation would need to handle the full login flow
@@ -293,20 +302,20 @@ class FPLAPI:
     
     async def get_team_data(self):
         """Get team data for the configured team ID"""
-        if not TEAM_ID:
+        if not self.team_id:
             logger.error("No TEAM_ID configured")
             return None
             
         try:
-            url = f"{FPL_BASE_URL}/entry/{TEAM_ID}/"
+            url = f"{FPL_BASE_URL}/entry/{self.team_id}/"
             return await self._make_request_with_retry(url)
         except Exception as e:
-            logger.error(f"Error fetching team data for ID {TEAM_ID}: {str(e)}")
+            logger.error(f"Error fetching team data for ID {self.team_id}: {str(e)}")
             return None
     
     async def get_team_picks(self, gameweek=None):
         """Get team picks for a specific gameweek (defaults to current)"""
-        if not TEAM_ID:
+        if not self.team_id:
             logger.error("No TEAM_ID configured")
             return None
             
@@ -328,10 +337,10 @@ class FPLAPI:
                 logger.error("Could not determine current gameweek")
                 return None
                 
-            url = f"{FPL_BASE_URL}/entry/{TEAM_ID}/event/{gameweek}/picks/"
+            url = f"{FPL_BASE_URL}/entry/{self.team_id}/event/{gameweek}/picks/"
             return await self._make_request_with_retry(url)
         except Exception as e:
-            logger.error(f"Error fetching team picks for ID {TEAM_ID}, GW {gameweek}: {str(e)}")
+            logger.error(f"Error fetching team picks for ID {self.team_id}, GW {gameweek}: {str(e)}")
             return None
     
     async def get_player_info(self, player_id):
@@ -399,7 +408,7 @@ class FPLAPI:
     
     async def execute_transfers(self, transfers):
         """Execute transfers in FPL"""
-        if not TEAM_ID:
+        if not self.team_id:
             logger.error("No TEAM_ID configured")
             return False
             
@@ -413,7 +422,7 @@ class FPLAPI:
             # Prepare transfer payload
             transfer_payload = {
                 'confirmed': True,
-                'entry': int(TEAM_ID),
+                'entry': int(self.team_id),
                 'wildcard': False,
                 'freehit': False,
                 'benchboost': False,

@@ -1,0 +1,59 @@
+version: '3.8'
+
+services:
+  fpl-bot:
+    build: .
+    container_name: fpl-bot
+    environment:
+      - FPL_USERNAME=${FPL_USERNAME}
+      - FPL_PASSWORD=${FPL_PASSWORD}
+      - SESSION_ID=${SESSION_ID}
+      - CSRF_TOKEN=${CSRF_TOKEN}
+      - TEAM_ID=${TEAM_ID}
+      - DATABASE_URL=sqlite:///./fpl_bot.db
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    volumes:
+      - ./logs:/app/logs
+      - ./fpl_bot.db:/app/fpl_bot.db
+    restart: unless-stopped
+    networks:
+      - fpl-network
+
+  # PostgreSQL database (optional, for better performance)
+  postgres:
+    image: postgres:15-alpine
+    container_name: fpl-postgres
+    environment:
+      - POSTGRES_DB=fpl_bot
+      - POSTGRES_USER=fpl_user
+      - POSTGRES_PASSWORD=fpl_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+    networks:
+      - fpl-network
+
+  # Web dashboard for monitoring (to be implemented)
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile.dashboard
+    container_name: fpl-dashboard
+    ports:
+      - "8000:8000"
+    depends_on:
+      - fpl-bot
+    environment:
+      - DATABASE_URL=postgresql://fpl_user:fpl_password@postgres:5432/fpl_bot
+    restart: unless-stopped
+    networks:
+      - fpl-network
+
+volumes:
+  postgres_data:
+
+networks:
+  fpl-network:
+    driver: bridge
