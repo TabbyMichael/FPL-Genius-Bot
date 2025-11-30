@@ -1,0 +1,85 @@
+# Environment variables and secrets
+.env
+.env.local
+.env.*.local
+.env.production
+.env.development
+.env.test
+.env.example  # Don't ignore example file as it's for documentation
+!.env.example
+
+# Logs
+logs/
+*.log
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+.coverage
+.coveragerc
+.tox
+.pytest_cache/
+.pytest_cache
+nosetests.xml
+coverage.xml
+*.egg-info/
+dist/
+build/
+
+# Virtual Environment
+venv/
+env/
+ENV/
+.venv/
+.env/
+.ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*.sublime-project
+*.sublime-workspace
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Security
+*.key
+*.pem
+*.pub
+id_rsa
+id_rsa.pub
+config.json
+
+# Temporary files
+.tmp
+.temp
+*.tmp
+*.temp
+
+# Backup files
+*.bak
+*.backup
+*~
+
+# Local configuration files
+config/local.*
+settings/local.*
+
+# Sensitive data files
+secrets.json
+credentials.json
+*.secret
