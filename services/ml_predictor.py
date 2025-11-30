@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.model_selection import train_test_split
+import xgboost as xgb
+from sklearn.model_selection import train_test_split, GridSearchCV
 from sklearn.metrics import mean_squared_error
 from sqlalchemy.orm import Session
 from config.database import PlayerPerformance, PlayerPrediction, get_db
@@ -13,30 +13,13 @@ class MLPredictor:
     """Machine Learning predictor for player performance"""
     
     def __init__(self):
-        self.model = RandomForestRegressor(
-            n_estimators=100, 
-            random_state=42,
-            max_depth=10,
-            min_samples_split=5,
-            min_samples_leaf=2
-        )
+        self.model = xgb.XGBRegressor(objective='reg:squarederror', n_estimators=100, random_state=42)
         self.is_trained = False
         self.feature_names = [
-            'opponent_difficulty',
-            'minutes_played',
-            'goals_scored',
-            'assists',
-            'clean_sheet',
-            'yellow_cards',
-            'red_cards',
-            'saves',
-            'bonus',
-            'bps',  # Bonus points system
-            'form',
-            'points_per_game',
-            'selected_by_percent',
-            'transfers_in',
-            'transfers_out'
+            'opponent_difficulty', 'minutes_played', 'goals_scored', 'assists',
+            'clean_sheet', 'yellow_cards', 'red_cards', 'saves', 'bonus', 'bps',
+            'form', 'points_per_game', 'selected_by_percent', 'transfers_in',
+            'transfers_out', 'creativity', 'influence', 'threat', 'ict_index'
         ]
     
     def prepare_features(self, player_data):
@@ -55,11 +38,15 @@ class MLPredictor:
                 getattr(record, 'saves', 0) or 0,
                 getattr(record, 'bonus', 0) or 0,
                 getattr(record, 'bps', 0) or 0,
-                getattr(record, 'form', 0.0) or 0.0,
-                getattr(record, 'points_per_game', 0.0) or 0.0,
-                getattr(record, 'selected_by_percent', 0.0) or 0.0,
+                float(getattr(record, 'form', 0.0) or 0.0),
+                float(getattr(record, 'points_per_game', 0.0) or 0.0),
+                float(getattr(record, 'selected_by_percent', 0.0) or 0.0),
                 getattr(record, 'transfers_in', 0) or 0,
-                getattr(record, 'transfers_out', 0) or 0
+                getattr(record, 'transfers_out', 0) or 0,
+                float(getattr(record, 'creativity', 0.0) or 0.0),
+                float(getattr(record, 'influence', 0.0) or 0.0),
+                float(getattr(record, 'threat', 0.0) or 0.0),
+                float(getattr(record, 'ict_index', 0.0) or 0.0)
             ]
             features.append(feature_vector)
         return np.array(features)
@@ -90,14 +77,23 @@ class MLPredictor:
             # Split data
             X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
             
-            # Train model
-            self.model.fit(X_train, y_train)
+            # Hyperparameter tuning
+            param_grid = {
+                'n_estimators': [100, 200],
+                'max_depth': [3, 5, 7],
+                'learning_rate': [0.05, 0.1],
+                'colsample_bytree': [0.7, 1.0]
+            }
+            grid_search = GridSearchCV(estimator=self.model, param_grid=param_grid, cv=3, n_jobs=-1, scoring='neg_mean_squared_error')
+            grid_search.fit(X_train, y_train)
+
+            self.model = grid_search.best_estimator_
             self.is_trained = True
             
             # Evaluate model
             y_pred = self.model.predict(X_test)
             mse = mean_squared_error(y_test, y_pred)
-            logger.info(f"Model trained. MSE: {mse:.2f}, Samples: {len(X)}")
+            logger.info(f"Model trained with best params: {grid_search.best_params_}. MSE: {mse:.2f}, Samples: {len(X)}")
             
             return True
         except Exception as e:
@@ -112,6 +108,21 @@ class MLPredictor:
             return max(0, player_stats.get('form', 0) * 1.2)
         
         try:
+            # Data validation and cleaning
+            numeric_features = [
+                'minutes', 'goals_scored', 'assists', 'clean_sheets',
+                'yellow_cards', 'red_cards', 'saves', 'bonus', 'bps',
+                'form', 'points_per_game', 'selected_by_percent',
+                'transfers_in', 'transfers_out'
+            ]
+            for feature in numeric_features:
+                try:
+                    player_stats[feature] = pd.to_numeric(player_stats.get(feature, 0), errors='coerce')
+                    if pd.isna(player_stats[feature]):
+                        player_stats[feature] = 0
+                except (ValueError, TypeError):
+                    player_stats[feature] = 0
+
             # Prepare feature vector with default values for missing features
             features = np.array([[
                 opponent_difficulty or 3,
@@ -128,8 +139,12 @@ class MLPredictor:
                 player_stats.get('points_per_game', 0.0) or 0.0,
                 player_stats.get('selected_by_percent', 0.0) or 0.0,
                 player_stats.get('transfers_in', 0) or 0,
-                player_stats.get('transfers_out', 0) or 0
-            ]])
+                player_stats.get('transfers_out', 0) or 0,
+                player_stats.get('creativity', 0.0) or 0.0,
+                player_stats.get('influence', 0.0) or 0.0,
+                player_stats.get('threat', 0.0) or 0.0,
+                player_stats.get('ict_index', 0.0) or 0.0
+            ]], dtype=np.float64)  # Ensure dtype is float
             
             # Validate features
             if np.isnan(features).any() or not np.isfinite(features).all():
