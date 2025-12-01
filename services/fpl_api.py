@@ -6,7 +6,7 @@ from typing import Optional
 from playwright.async_api import async_playwright
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from config.settings import FPL_BASE_URL
-from utils.security import log_api_call, log_authentication_attempt
+from utils.security import log_api_call, log_authentication_attempt, log_transfer_execution
 
 logger = logging.getLogger(__name__)
 
@@ -427,10 +427,7 @@ class FPLAPI:
                             if response.status == 200:
                                 result = await response.json()
                                 logger.info(f"Transfers executed successfully: {result}")
-                                # Log transfer execution
                                 for transfer in transfers:
-                                    # Import here to avoid circular imports
-                                    from utils.security import log_transfer_execution
                                     log_transfer_execution(
                                         transfer.get('element_out', 0),
                                         transfer.get('element_in', 0),
@@ -441,13 +438,10 @@ class FPLAPI:
                                 logger.warning("Unauthorized during transfer execution, re-authenticating...")
                                 if await self._authenticate():
                                     if attempt < max_retries - 1:
-                                        continue  # Retry after re-authentication
+                                        continue
                                 else:
                                     logger.error("Failed to re-authenticate for transfer execution")
-                                    # Log failed transfer execution
                                     for transfer in transfers:
-                                        # Import here to avoid circular imports
-                                        from utils.security import log_transfer_execution
                                         log_transfer_execution(
                                             transfer.get('element_out', 0),
                                             transfer.get('element_in', 0),
@@ -457,25 +451,19 @@ class FPLAPI:
                             else:
                                 error_text = await response.text()
                                 logger.error(f"Failed to execute transfers. Status: {response.status}, Error: {error_text}")
-                                # Log failed transfer execution
                                 for transfer in transfers:
-                                    # Import here to avoid circular imports
-                                    from utils.security import log_transfer_execution
                                     log_transfer_execution(
                                         transfer.get('element_out', 0),
                                         transfer.get('element_in', 0),
                                         False
                                     )
                                 if attempt < max_retries - 1:
-                                    await asyncio.sleep(2 ** attempt)  # Exponential backoff
+                                    await asyncio.sleep(2 ** attempt)
                                     continue
                                 return False
                     else:
                         logger.error("No authenticated session available for transfer execution")
-                        # Log failed transfer execution
                         for transfer in transfers:
-                            # Import here to avoid circular imports
-                            from utils.security import log_transfer_execution
                             log_transfer_execution(
                                 transfer.get('element_out', 0),
                                 transfer.get('element_in', 0),
@@ -485,12 +473,9 @@ class FPLAPI:
                 except Exception as e:
                     logger.error(f"Error executing transfers (attempt {attempt + 1}): {str(e)}")
                     if attempt < max_retries - 1:
-                        await asyncio.sleep(2 ** attempt)  # Exponential backoff
+                        await asyncio.sleep(2 ** attempt)
                         continue
-                    # Log failed transfer execution due to exception
                     for transfer in transfers:
-                        # Import here to avoid circular imports
-                        from utils.security import log_transfer_execution
                         log_transfer_execution(
                             transfer.get('element_out', 0),
                             transfer.get('element_in', 0),
@@ -498,14 +483,11 @@ class FPLAPI:
                         )
                     return False
             
-            return False  # All retries exhausted
+            return False
                 
         except Exception as e:
             logger.error(f"Error executing transfers: {str(e)}")
-            # Log failed transfer execution due to exception
             for transfer in transfers:
-                # Import here to avoid circular imports
-                from utils.security import log_transfer_execution
                 log_transfer_execution(
                     transfer.get('element_out', 0),
                     transfer.get('element_in', 0),
