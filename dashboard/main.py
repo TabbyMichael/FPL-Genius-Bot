@@ -65,12 +65,15 @@ async def get_player_name(player_id: int) -> str:
         # Create FPL API instance (without auth for public data)
         async with FPLAPI() as api:
             player_info = await api.get_player_info(player_id)
-            if player_info:
-                player_name = player_info.get('web_name', f'Player {player_id}')
-                _player_cache[player_id] = player_name
-                return player_name
-            else:
-                return f'Player {player_id}'
+            if player_info and isinstance(player_info, dict):
+                # Safely extract the web_name
+                player_name = player_info.get('web_name')
+                if player_name:
+                    _player_cache[player_id] = player_name
+                    return player_name
+            
+            # Fallback if player info is not available
+            return f'Player {player_id}'
     except Exception as e:
         logger.error(f"Error fetching player name for ID {player_id}: {str(e)}")
         return f'Player {player_id}'
@@ -111,7 +114,7 @@ async def get_performance_history(limit: int = 50, db: Session = Depends(get_dat
         # Get player names for all unique player IDs
         player_ids = []
         for p in performances:
-            player_id = int(p.player_id) if hasattr(p, 'player_id') else 0
+            player_id = p.player_id if p.player_id is not None else 0
             if player_id not in player_ids:
                 player_ids.append(player_id)
         
@@ -121,17 +124,18 @@ async def get_performance_history(limit: int = 50, db: Session = Depends(get_dat
         
         result = []
         for p in performances:
+            player_id = p.player_id if p.player_id is not None else 0
             result.append({
-                "id": int(p.id) if hasattr(p, 'id') else 0,
-                "player_id": int(p.player_id) if hasattr(p, 'player_id') else 0,
-                "player_name": player_names.get(int(p.player_id) if hasattr(p, 'player_id') else 0, f'Player {p.player_id if hasattr(p, "player_id") else 0}'),
-                "gameweek": int(p.gameweek) if hasattr(p, 'gameweek') and p.gameweek is not None else 0,
-                "expected_points": float(p.expected_points) if hasattr(p, 'expected_points') and p.expected_points is not None else 0.0,
-                "actual_points": float(p.actual_points) if hasattr(p, 'actual_points') and p.actual_points is not None else 0.0,
-                "opponent_difficulty": int(p.opponent_difficulty) if hasattr(p, 'opponent_difficulty') and p.opponent_difficulty is not None else 3,
-                "form": float(p.form) if hasattr(p, 'form') and p.form is not None else 0.0,
-                "points_per_game": float(p.points_per_game) if hasattr(p, 'points_per_game') and p.points_per_game is not None else 0.0,
-                "created_at": p.created_at.isoformat() if hasattr(p, 'created_at') and p.created_at is not None else None
+                "id": p.id if p.id is not None else 0,
+                "player_id": player_id,
+                "player_name": player_names.get(player_id, f'Player {player_id}'),
+                "gameweek": p.gameweek if p.gameweek is not None else 0,
+                "expected_points": p.expected_points if p.expected_points is not None else 0.0,
+                "actual_points": p.actual_points if p.actual_points is not None else 0.0,
+                "opponent_difficulty": p.opponent_difficulty if p.opponent_difficulty is not None else 3,
+                "form": p.form if p.form is not None else 0.0,
+                "points_per_game": p.points_per_game if p.points_per_game is not None else 0.0,
+                "created_at": p.created_at.isoformat() if p.created_at is not None else None
             })
         
         return result
@@ -150,7 +154,7 @@ async def get_latest_predictions(limit: int = 50, db: Session = Depends(get_data
         # Get player names for all unique player IDs
         player_ids = []
         for p in predictions:
-            player_id = int(p.player_id) if hasattr(p, 'player_id') else 0
+            player_id = p.player_id if p.player_id is not None else 0
             if player_id not in player_ids:
                 player_ids.append(player_id)
         
@@ -160,15 +164,16 @@ async def get_latest_predictions(limit: int = 50, db: Session = Depends(get_data
         
         result = []
         for p in predictions:
+            player_id = p.player_id if p.player_id is not None else 0
             result.append({
-                "id": int(p.id) if hasattr(p, 'id') else 0,
-                "player_id": int(p.player_id) if hasattr(p, 'player_id') else 0,
-                "player_name": player_names.get(int(p.player_id) if hasattr(p, 'player_id') else 0, f'Player {p.player_id if hasattr(p, "player_id") else 0}'),
-                "gameweek": int(p.gameweek) if hasattr(p, 'gameweek') and p.gameweek is not None else 0,
-                "predicted_points": float(p.predicted_points) if hasattr(p, 'predicted_points') and p.predicted_points is not None else 0.0,
-                "confidence_interval": float(p.confidence_interval) if hasattr(p, 'confidence_interval') and p.confidence_interval is not None else 0.0,
+                "id": p.id if p.id is not None else 0,
+                "player_id": player_id,
+                "player_name": player_names.get(player_id, f'Player {player_id}'),
+                "gameweek": p.gameweek if p.gameweek is not None else 0,
+                "predicted_points": p.predicted_points if p.predicted_points is not None else 0.0,
+                "confidence_interval": p.confidence_interval if p.confidence_interval is not None else 0.0,
                 "model_version": getattr(p, 'model_version', ''),
-                "created_at": p.created_at.isoformat() if hasattr(p, 'created_at') and p.created_at is not None else None
+                "created_at": p.created_at.isoformat() if p.created_at is not None else None
             })
         
         return result
@@ -187,8 +192,8 @@ async def get_transfer_history(limit: int = 50, db: Session = Depends(get_databa
         # Get player names for all unique player IDs
         player_ids = []
         for t in transfers:
-            player_out_id = int(t.player_out_id) if hasattr(t, 'player_out_id') else 0
-            player_in_id = int(t.player_in_id) if hasattr(t, 'player_in_id') else 0
+            player_out_id = t.player_out_id if t.player_out_id is not None else 0
+            player_in_id = t.player_in_id if t.player_in_id is not None else 0
             if player_out_id not in player_ids:
                 player_ids.append(player_out_id)
             if player_in_id not in player_ids:
@@ -200,16 +205,18 @@ async def get_transfer_history(limit: int = 50, db: Session = Depends(get_databa
         
         result = []
         for t in transfers:
+            player_out_id = t.player_out_id if t.player_out_id is not None else 0
+            player_in_id = t.player_in_id if t.player_in_id is not None else 0
             result.append({
-                "id": int(t.id) if hasattr(t, 'id') else 0,
-                "player_out_id": int(t.player_out_id) if hasattr(t, 'player_out_id') else 0,
-                "player_out_name": player_names.get(int(t.player_out_id) if hasattr(t, 'player_out_id') else 0, f'Player {t.player_out_id if hasattr(t, "player_out_id") else 0}'),
-                "player_in_id": int(t.player_in_id) if hasattr(t, 'player_in_id') else 0,
-                "player_in_name": player_names.get(int(t.player_in_id) if hasattr(t, 'player_in_id') else 0, f'Player {t.player_in_id if hasattr(t, "player_in_id") else 0}'),
-                "gameweek": int(t.gameweek) if hasattr(t, 'gameweek') and t.gameweek is not None else 0,
-                "transfer_gain": float(t.transfer_gain) if hasattr(t, 'transfer_gain') and t.transfer_gain is not None else 0.0,
-                "cost": int(t.cost) if hasattr(t, 'cost') and t.cost is not None else 0,
-                "timestamp": t.timestamp.isoformat() if hasattr(t, 'timestamp') and t.timestamp is not None else None
+                "id": t.id if t.id is not None else 0,
+                "player_out_id": player_out_id,
+                "player_out_name": player_names.get(player_out_id, f'Player {player_out_id}'),
+                "player_in_id": player_in_id,
+                "player_in_name": player_names.get(player_in_id, f'Player {player_in_id}'),
+                "gameweek": t.gameweek if t.gameweek is not None else 0,
+                "transfer_gain": t.transfer_gain if t.transfer_gain is not None else 0.0,
+                "cost": t.cost if t.cost is not None else 0,
+                "timestamp": t.timestamp.isoformat() if t.timestamp is not None else None
             })
         
         return result

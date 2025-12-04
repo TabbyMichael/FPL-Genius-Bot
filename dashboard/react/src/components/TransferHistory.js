@@ -12,6 +12,7 @@ import {
   Tooltip,
   Legend,
 } from 'chart.js';
+import './TransferHistory.css';
 
 ChartJS.register(
   CategoryScale,
@@ -28,13 +29,17 @@ const TransferHistory = () => {
   const [transfers, setTransfers] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [totalPages, setTotalPages] = useState(1);
+  const [itemsPerPage] = useState(20);
 
   useEffect(() => {
     const fetchData = async () => {
       try {
         setLoading(true);
-        const response = await fetchTransferHistory(100);
+        const response = await fetchTransferHistory(1000); // Fetch more data for pagination
         setTransfers(response.data);
+        setTotalPages(Math.ceil(response.data.length / itemsPerPage));
       } catch (err) {
         setError('Failed to fetch transfer history');
         console.error(err);
@@ -45,6 +50,14 @@ const TransferHistory = () => {
 
     fetchData();
   }, []);
+
+  // Get current transfers for pagination
+  const indexOfLastTransfer = currentPage * itemsPerPage;
+  const indexOfFirstTransfer = indexOfLastTransfer - itemsPerPage;
+  const currentTransfers = transfers.slice(indexOfFirstTransfer, indexOfLastTransfer);
+
+  // Change page
+  const paginate = (pageNumber) => setCurrentPage(pageNumber);
 
   if (loading) {
     return <div className="loading">Loading transfer history...</div>;
@@ -139,13 +152,13 @@ const TransferHistory = () => {
   };
 
   return (
-    <div>
+    <div className="transfer-history-container">
       <h1>Transfer History</h1>
       
       <div className="dashboard-card">
         <h2>Transfer Data</h2>
         <div className="table-container">
-          <table>
+          <table className="transfer-table">
             <thead>
               <tr>
                 <th>ID</th>
@@ -158,7 +171,7 @@ const TransferHistory = () => {
               </tr>
             </thead>
             <tbody>
-              {transfers.map((transfer) => (
+              {currentTransfers.map((transfer) => (
                 <tr key={transfer.id}>
                   <td>{transfer.id}</td>
                   <td>{transfer.player_out_name}</td>
@@ -171,6 +184,29 @@ const TransferHistory = () => {
               ))}
             </tbody>
           </table>
+        </div>
+        
+        {/* Pagination */}
+        <div className="pagination">
+          <button 
+            onClick={() => paginate(currentPage - 1)} 
+            disabled={currentPage === 1}
+            className="pagination-btn"
+          >
+            Previous
+          </button>
+          
+          <span className="pagination-info">
+            Page {currentPage} of {totalPages}
+          </span>
+          
+          <button 
+            onClick={() => paginate(currentPage + 1)} 
+            disabled={currentPage === totalPages}
+            className="pagination-btn"
+          >
+            Next
+          </button>
         </div>
       </div>
 

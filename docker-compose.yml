@@ -1,6 +1,19 @@
 version: '3.8'
 
 services:
+  # RabbitMQ message broker
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: fpl-rabbitmq
+    ports:
+      - "5672:5672"   # AMQP protocol
+      - "15672:15672" # Management UI
+    networks:
+      - fpl-network
+    environment:
+      - RABBITMQ_DEFAULT_USER=guest
+      - RABBITMQ_DEFAULT_PASS=guest
+
   # Database initialization service (runs once)
   init-db:
     build: .
@@ -8,30 +21,9 @@ services:
     command: python init_db.py
     environment:
       - DATABASE_URL=sqlite:///./fpl_bot.db
-    volumes:
-      - ./fpl_bot.db:/app/fpl_bot.db
-    networks:
-      - fpl-network
-
-  # Main FPL bot service
-  fpl-bot:
-    build: .
-    container_name: fpl-bot
-    depends_on:
-      init-db:
-        condition: service_completed_successfully
-    environment:
-      - FPL_USERNAME=${FPL_USERNAME}
-      - FPL_PASSWORD=${FPL_PASSWORD}
-      - SESSION_ID=${SESSION_ID}
-      - CSRF_TOKEN=${CSRF_TOKEN}
       - TEAM_ID=${TEAM_ID}
-      - DATABASE_URL=sqlite:///./fpl_bot.db
-      - LOG_LEVEL=${LOG_LEVEL:-INFO}
     volumes:
-      - ./logs:/app/logs
       - ./fpl_bot.db:/app/fpl_bot.db
-    restart: unless-stopped
     networks:
       - fpl-network
 
@@ -40,11 +32,17 @@ services:
     build: .
     container_name: fpl-dashboard-api
     depends_on:
+      rabbitmq:
+        condition: service_started
       init-db:
         condition: service_completed_successfully
     command: python -m uvicorn dashboard.main:app --host 0.0.0.0 --port 8000
     environment:
       - DATABASE_URL=sqlite:///./fpl_bot.db
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
+      - TEAM_ID=${TEAM_ID}
+      - FPL_USERNAME=${FPL_USERNAME}
+      - FPL_PASSWORD=${FPL_PASSWORD}
     ports:
       - "8000:8000"
     volumes:
@@ -68,27 +66,6 @@ services:
     restart: unless-stopped
     networks:
       - fpl-network
-
-  # PostgreSQL database (optional, for better performance)
-  postgres:
-    image: postgres:15-alpine
-    container_name: fpl-postgres
-    environment:
-      - POSTGRES_DB=fpl_bot
-      - POSTGRES_USER=fpl_user
-      - POSTGRES_PASSWORD=fpl_password
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
-    restart: unless-stopped
-    networks:
-      - fpl-network
-    profiles:
-      - postgres
-
-volumes:
-  postgres_data:
 
 networks:
   fpl-network:

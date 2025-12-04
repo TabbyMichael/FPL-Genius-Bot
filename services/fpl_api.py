@@ -1,12 +1,13 @@
-import aiohttp
+import aiohttp  
 import asyncio
 import logging
 import time
 from typing import Optional
-from playwright.async_api import async_playwright
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from playwright.async_api import async_playwright  
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type  
 from config.settings import FPL_BASE_URL
 from utils.security import log_api_call, log_authentication_attempt, log_transfer_execution
+from services.session_manager import session_manager
 
 logger = logging.getLogger(__name__)
 
@@ -32,13 +33,28 @@ class FPLAPI:
         self.password = password
         self.session_id = session_id
         self.csrf_token = csrf_token
-        self.team_id = team_id
+        self.team_id = team_id or getattr(self, '_get_team_id', lambda: None)()
         
         # Session management
         self.last_auth_time = None
         self.session_expires_in = 3600  # 1 hour default
         self.min_session_time = 300  # 5 minutes minimum before expiration check
         
+        # Register with session manager
+        if self.team_id:
+            session_manager.store_session(self.team_id, {
+                'session_id': self.session_id,
+                'csrf_token': self.csrf_token,
+                'username': self.username,
+                'team_id': self.team_id,
+                'expires_at': time.time() + self.session_expires_in
+            })
+    
+    def _get_team_id(self):
+        """Get team ID from environment or settings"""
+        from config.settings import TEAM_ID
+        return TEAM_ID
+    
     async def __aenter__(self):
         # Create session with timeout settings
         connector = aiohttp.TCPConnector(limit=10, limit_per_host=5, ttl_dns_cache=300)
@@ -183,6 +199,17 @@ class FPLAPI:
                     }
                 )
                 self.last_auth_time = time.time()
+                
+                # Update session manager
+                if self.team_id:
+                    session_manager.store_session(self.team_id, {
+                        'session_id': self.session_id,
+                        'csrf_token': self.csrf_token,
+                        'username': self.username,
+                        'team_id': self.team_id,
+                        'expires_at': time.time() + self.session_expires_in
+                    })
+                
                 log_authentication_attempt(True, "session")
                 return True
             
@@ -220,6 +247,17 @@ class FPLAPI:
                         }
                     )
                     self.last_auth_time = time.time()
+                    
+                    # Update session manager
+                    if self.team_id:
+                        session_manager.store_session(self.team_id, {
+                            'session_id': self.session_id,
+                            'csrf_token': self.csrf_token,
+                            'username': self.username,
+                            'team_id': self.team_id,
+                            'expires_at': time.time() + self.session_expires_in
+                        })
+                    
                     log_authentication_attempt(True, "traditional")
                     return True
                 else:
@@ -247,6 +285,13 @@ class FPLAPI:
             logger.info("Session expired or invalid, refreshing")
             return await self._authenticate()
         
+        return True
+    
+    async def refresh_session_if_needed(self) -> bool:
+        """Proactively refresh session if it's about to expire"""
+        if self.team_id and session_manager.is_session_expiring_soon(self.team_id):
+            logger.info(f"Proactively refreshing session for team {self.team_id}")
+            return await session_manager.refresh_session(self.team_id, self)
         return True
     
     async def get_bootstrap_data(self):
@@ -384,22 +429,61 @@ class FPLAPI:
             logger.error(f"Error fetching injury status for player {player_id}: {str(e)}")
             return {'status': 'a', 'news': '', 'chance_of_playing_next_round': 100, 'chance_of_playing_this_round': 100}
     
-    async def execute_transfers(self, transfers):
+    async def execute_transfers(self, transfers, current_squad=None, budget=None, override=False):
         """Execute transfers in FPL with proper error handling and retry mechanisms"""
         if not self.team_id:
             logger.error("No TEAM_ID configured")
-            return False
+            return False, [{'code': 'NO_TEAM_ID', 'level': 'fail', 'message': 'No TEAM_ID configured', 'details': ''}]
             
         try:
+            # Import transfer validator here to avoid circular imports
+            from services.transfer_validator import transfer_validator
+            
+            # Validate transfers if we have the necessary data
+            validation_messages = []
+            if current_squad is not None and budget is not None:
+                # Get current gameweek
+                gameweek = 1
+                bootstrap_data = await self.get_bootstrap_data()
+                if bootstrap_data:
+                    events = bootstrap_data.get('events', [])
+                    for event in events:
+                        if event.get('is_current'):
+                            gameweek = event.get('id')
+                            break
+                
+                # Validate transfers
+                validation_result = transfer_validator.validate_transfers(
+                    transfers, current_squad, budget, gameweek, override=override
+                )
+                validation_messages = validation_result.get('messages', [])
+                
+                # Check if validation failed and override is not enabled
+                if validation_result['status'] == 'fail' and validation_result.get('override_required', True):
+                    logger.error("Transfer validation failed")
+                    return False, validation_messages
+            
             # Ensure we're authenticated
             if not await self._ensure_authenticated():
                 logger.error("Failed to authenticate for transfer execution")
-                return False
+                validation_messages.append({
+                    'code': 'AUTH_FAILED',
+                    'level': 'fail',
+                    'message': 'Failed to authenticate for transfer execution',
+                    'details': ''
+                })
+                return False, validation_messages
             
-            # Validate transfers
+            # Validate transfers format
             if not transfers or not isinstance(transfers, list):
                 logger.error("Invalid transfers data provided")
-                return False
+                validation_messages.append({
+                    'code': 'INVALID_TRANSFERS_DATA',
+                    'level': 'fail',
+                    'message': 'Invalid transfers data provided',
+                    'details': 'Transfers must be a non-empty list'
+                })
+                return False, validation_messages
             
             # Prepare transfer payload
             transfer_payload = {
@@ -428,12 +512,14 @@ class FPLAPI:
                                 result = await response.json()
                                 logger.info(f"Transfers executed successfully: {result}")
                                 for transfer in transfers:
+                                    element_out = transfer.get('element_out', transfer.get('out', {}))
+                                    element_in = transfer.get('element_in', transfer.get('in', {}))
                                     log_transfer_execution(
-                                        transfer.get('element_out', 0),
-                                        transfer.get('element_in', 0),
+                                        element_out.get('id', 0) if isinstance(element_out, dict) else 0,
+                                        element_in.get('id', 0) if isinstance(element_in, dict) else 0,
                                         True
                                     )
-                                return True
+                                return True, validation_messages
                             elif response.status == 401:  # Unauthorized
                                 logger.warning("Unauthorized during transfer execution, re-authenticating...")
                                 if await self._authenticate():
@@ -442,55 +528,95 @@ class FPLAPI:
                                 else:
                                     logger.error("Failed to re-authenticate for transfer execution")
                                     for transfer in transfers:
+                                        element_out = transfer.get('element_out', transfer.get('out', {}))
+                                        element_in = transfer.get('element_in', transfer.get('in', {}))
                                         log_transfer_execution(
-                                            transfer.get('element_out', 0),
-                                            transfer.get('element_in', 0),
+                                            element_out.get('id', 0) if isinstance(element_out, dict) else 0,
+                                            element_in.get('id', 0) if isinstance(element_in, dict) else 0,
                                             False
                                         )
-                                    return False
+                                    validation_messages.append({
+                                        'code': 'AUTH_FAILED',
+                                        'level': 'fail',
+                                        'message': 'Failed to re-authenticate for transfer execution',
+                                        'details': ''
+                                    })
+                                    return False, validation_messages
                             else:
                                 error_text = await response.text()
                                 logger.error(f"Failed to execute transfers. Status: {response.status}, Error: {error_text}")
                                 for transfer in transfers:
+                                    element_out = transfer.get('element_out', transfer.get('out', {}))
+                                    element_in = transfer.get('element_in', transfer.get('in', {}))
                                     log_transfer_execution(
-                                        transfer.get('element_out', 0),
-                                        transfer.get('element_in', 0),
+                                        element_out.get('id', 0) if isinstance(element_out, dict) else 0,
+                                        element_in.get('id', 0) if isinstance(element_in, dict) else 0,
                                         False
                                     )
                                 if attempt < max_retries - 1:
                                     await asyncio.sleep(2 ** attempt)
                                     continue
-                                return False
+                                
+                                validation_messages.append({
+                                    'code': 'TRANSFER_EXECUTION_FAILED',
+                                    'level': 'fail',
+                                    'message': f'Failed to execute transfers. Status: {response.status}',
+                                    'details': error_text
+                                })
+                                return False, validation_messages
                     else:
                         logger.error("No authenticated session available for transfer execution")
                         for transfer in transfers:
+                            element_out = transfer.get('element_out', transfer.get('out', {}))
+                            element_in = transfer.get('element_in', transfer.get('in', {}))
                             log_transfer_execution(
-                                transfer.get('element_out', 0),
-                                transfer.get('element_in', 0),
+                                element_out.get('id', 0) if isinstance(element_out, dict) else 0,
+                                element_in.get('id', 0) if isinstance(element_in, dict) else 0,
                                 False
                             )
-                        return False
+                        validation_messages.append({
+                            'code': 'NO_AUTH_SESSION',
+                            'level': 'fail',
+                            'message': 'No authenticated session available for transfer execution',
+                            'details': ''
+                        })
+                        return False, validation_messages
                 except Exception as e:
                     logger.error(f"Error executing transfers (attempt {attempt + 1}): {str(e)}")
                     if attempt < max_retries - 1:
                         await asyncio.sleep(2 ** attempt)
                         continue
                     for transfer in transfers:
+                        element_out = transfer.get('element_out', transfer.get('out', {}))
+                        element_in = transfer.get('element_in', transfer.get('in', {}))
                         log_transfer_execution(
-                            transfer.get('element_out', 0),
-                            transfer.get('element_in', 0),
+                            element_out.get('id', 0) if isinstance(element_out, dict) else 0,
+                            element_in.get('id', 0) if isinstance(element_in, dict) else 0,
                             False
                         )
-                    return False
+                    validation_messages.append({
+                        'code': 'TRANSFER_EXCEPTION',
+                        'level': 'fail',
+                        'message': f'Error executing transfers: {str(e)}',
+                        'details': ''
+                    })
+                    return False, validation_messages
             
-            return False
+            return False, validation_messages
                 
         except Exception as e:
             logger.error(f"Error executing transfers: {str(e)}")
-            for transfer in transfers:
+            for transfer in transfers or []:
+                element_out = transfer.get('element_out', transfer.get('out', {}))
+                element_in = transfer.get('element_in', transfer.get('in', {}))
                 log_transfer_execution(
-                    transfer.get('element_out', 0),
-                    transfer.get('element_in', 0),
+                    element_out.get('id', 0) if isinstance(element_out, dict) else 0,
+                    element_in.get('id', 0) if isinstance(element_in, dict) else 0,
                     False
                 )
-            return False
+            return False, [{
+                'code': 'INTERNAL_ERROR',
+                'level': 'fail',
+                'message': f'Internal error executing transfers: {str(e)}',
+                'details': ''
+            }]
