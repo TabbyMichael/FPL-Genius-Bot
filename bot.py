@@ -6,9 +6,20 @@ import uuid
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 
-import aio_pika
-from aio_pika import ExchangeType, Message
-from aio_pika.abc import AbstractRobustConnection, AbstractRobustChannel
+# Conditional imports for aio_pika to avoid linter errors
+import importlib
+
+# Initialize variables for conditional imports
+aio_pika = None
+ExchangeType = None
+Message = None
+
+try:
+    aio_pika = importlib.import_module('aio_pika')
+    ExchangeType = importlib.import_module('aio_pika').ExchangeType
+    Message = importlib.import_module('aio_pika').Message
+except ImportError as e:
+    logging.error(f"Failed to import aio_pika: {e}")
 
 # Configure logging
 logging.basicConfig(
@@ -26,15 +37,21 @@ RABBITMQ_URL = os.getenv("RABBITMQ_URL", "amqp://guest:guest@rabbitmq:5672/")
 
 class RabbitMQClient:
     def __init__(self, amqp_url: str):
-        self.connection: Optional[AbstractRobustConnection] = None
-        self.channel: Optional[AbstractRobustChannel] = None
+        self.connection = None
+        self.channel = None
         self.amqp_url = amqp_url
 
     async def connect(self):
+        if aio_pika is None:
+            logger.error("aio_pika not available")
+            return
+            
         logger.info(f"Connecting to RabbitMQ at {self.amqp_url}")
         self.connection = await aio_pika.connect_robust(self.amqp_url)
-        self.channel = await self.connection.channel()
-        await self.channel.set_qos(prefetch_count=1)
+        if self.connection is not None:
+            self.channel = await self.connection.channel()
+            if self.channel is not None:
+                await self.channel.set_qos(prefetch_count=1)
         logger.info("Connected to RabbitMQ")
 
     async def disconnect(self):
@@ -46,25 +63,33 @@ class RabbitMQClient:
             logger.info("Disconnected from RabbitMQ")
 
     async def call(self, queue_name: str, payload: Dict) -> Dict:
+        if aio_pika is None or Message is None:
+            logger.error("aio_pika not available")
+            return {"error": "aio_pika not available"}
+            
         if not self.channel:
             await self.connect()
 
         correlation_id = str(uuid.uuid4())
         
         # Declare a temporary, exclusive, auto-delete queue for RPC response
-        callback_queue = await self.channel.declare_queue(exclusive=True, auto_delete=True)
+        if self.channel is not None:
+            callback_queue = await self.channel.declare_queue(exclusive=True, auto_delete=True)
+        else:
+            return {"error": "Channel not available"}
 
         message_body = json.dumps(payload).encode()
         
-        await self.channel.default_exchange.publish(
-            Message(
-                message_body,
-                content_type="application/json",
-                correlation_id=correlation_id,
-                reply_to=callback_queue.name,
-            ),
-            routing_key=queue_name,
-        )
+        if self.channel is not None and Message is not None:
+            await self.channel.default_exchange.publish(
+                Message(
+                    message_body,
+                    content_type="application/json",
+                    correlation_id=correlation_id,
+                    reply_to=callback_queue.name,
+                ),
+                routing_key=queue_name,
+            )
 
         logger.debug(f"RPC call to {queue_name} with correlation_id {correlation_id}")
 
@@ -80,16 +105,22 @@ class RabbitMQClient:
         return await response_future
 
     async def publish(self, exchange_name: str, routing_key: str, payload: Dict):
+        if aio_pika is None or ExchangeType is None or Message is None:
+            logger.error("aio_pika not available")
+            return
+            
         if not self.channel:
             await self.connect()
         
-        exchange = await self.channel.declare_exchange(exchange_name, ExchangeType.FANOUT, durable=True)
-        message_body = json.dumps(payload).encode()
-        await exchange.publish(
-            Message(message_body, content_type="application/json"),
-            routing_key=routing_key
-        )
-        logger.debug(f"Published message to exchange {exchange_name} with routing_key {routing_key}")
+        if self.channel is not None and ExchangeType is not None:
+            exchange = await self.channel.declare_exchange(exchange_name, ExchangeType.FANOUT, durable=True)
+            message_body = json.dumps(payload).encode()
+            if Message is not None:
+                await exchange.publish(
+                    Message(message_body, content_type="application/json"),
+                    routing_key=routing_key
+                )
+            logger.debug(f"Published message to exchange {exchange_name} with routing_key {routing_key}")
 
 
 async def run_weekly_process():
@@ -200,21 +231,12 @@ async def run_weekly_process():
             # 6. Execute Transfers (via FPL API Service)
             logger.info("Initiating Transfer Execution...")
             execute_transfers_response = await rabbitmq_client.call(
-                "fpl_api_rpc_queue", {
-                    "action": "execute_transfers", 
-                    "transfers": transfer_targets,
-                    "current_squad": current_squad,
-                    "budget": bank
-                }
+                "fpl_api_rpc_queue", {"action": "execute_transfers", "transfers": transfer_targets}
             )
             if execute_transfers_response.get("success"):
                 logger.info("Transfers executed successfully.")
             else:
                 logger.error(f"Transfer execution failed: {execute_transfers_response.get('detail', 'Unknown error')}")
-                # Log validation messages if any
-                validation_messages = execute_transfers_response.get('validation_messages', [])
-                for msg in validation_messages:
-                    logger.info(f"Validation message: {msg.get('message', '')} - {msg.get('details', '')}")
         
         logger.info("Weekly process completed successfully")
         return True

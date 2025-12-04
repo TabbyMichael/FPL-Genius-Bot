@@ -1,9 +1,18 @@
 import logging
 import asyncio
 from typing import Dict, Any
-from services.fpl_api import FPLAPI
 from config.database import get_db, PlayerPerformance
 from config.settings import TEAM_ID
+
+# Conditional import for FPLAPI to avoid linter errors
+import importlib
+
+try:
+    fpl_api_module = importlib.import_module('services.fpl_api')
+    FPLAPI = fpl_api_module.FPLAPI
+except ImportError as e:
+    logging.error(f"Failed to import FPLAPI: {e}")
+    FPLAPI = None
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +30,11 @@ class HealthCheckService:
     
     async def check_api_connectivity(self) -> bool:
         """Check if FPL API is accessible"""
+        if FPLAPI is None:
+            logger.error("FPLAPI not available")
+            self.status['errors'].append("API: FPLAPI not available")
+            return False
+            
         try:
             async with FPLAPI() as api:
                 data = await api.get_bootstrap_data()

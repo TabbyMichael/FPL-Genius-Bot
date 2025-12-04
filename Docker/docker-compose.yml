@@ -1,0 +1,168 @@
+version: '3.8'
+
+services:
+  # RabbitMQ message broker
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: fpl-rabbitmq
+    ports:
+      - "5672:5672"   # AMQP protocol
+      - "15672:15672" # Management UI
+    networks:
+      - fpl-network
+
+  # Database initialization service (runs once)
+  init-db:
+    build: .
+    container_name: fpl-init-db
+    command: python init_db.py
+    environment:
+      - DATABASE_URL=sqlite:///./fpl_bot.db
+    volumes:
+      - ./fpl_bot.db:/app/fpl_bot.db
+    networks:
+      - fpl-network
+
+  # Main orchestrator service (formerly fpl-bot)
+  orchestrator-service:
+    build: .
+    container_name: fpl-orchestrator
+    depends_on:
+      - init-db
+      - rabbitmq
+    environment:
+      - FPL_USERNAME=${FPL_USERNAME}
+      - FPL_PASSWORD=${FPL_PASSWORD}
+      - SESSION_ID=${SESSION_ID}
+      - CSRF_TOKEN=${CSRF_TOKEN}
+      - TEAM_ID=${TEAM_ID}
+      - DATABASE_URL=sqlite:///./fpl_bot.db
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
+    volumes:
+      - ./logs:/app/logs
+      - ./models:/app/models
+      - ./fpl_bot.db:/app/fpl_bot.db
+    restart: unless-stopped
+    networks:
+      - fpl-network
+
+  # FPL API Service (Future)
+  fpl-api-service:
+    build:
+      context: ./services/fpl_api_service
+    container_name: fpl-api-service
+    depends_on:
+      - rabbitmq
+    environment:
+      - FPL_USERNAME=${FPL_USERNAME}
+      - FPL_PASSWORD=${FPL_PASSWORD}
+      - SESSION_ID=${SESSION_ID}
+      - CSRF_TOKEN=${CSRF_TOKEN}
+      - TEAM_ID=${TEAM_ID}
+    ports:
+      - "8001:8001"
+    restart: unless-stopped
+    networks:
+      - fpl-network
+
+  # ML Prediction Service
+  ml-prediction-service:
+    build:
+      context: ./services/ml_prediction_service
+    container_name: fpl-ml-service
+    depends_on:
+      - rabbitmq
+      - init-db
+    environment:
+      - DATABASE_URL=sqlite:///./fpl_bot.db
+    ports:
+      - "8002:8002"
+    volumes:
+      - ./models:/app/models
+      - ./fpl_bot.db:/app/fpl_bot.db
+    restart: unless-stopped
+    networks:
+      - fpl-network
+
+  # Transfer Logic Service
+  transfer-logic-service:
+    build:
+      context: ./services/transfer_logic_service
+    container_name: fpl-transfer-service
+    depends_on:
+      - rabbitmq
+      - init-db
+      - fpl-api-service
+      - ml-prediction-service
+    environment:
+      - DATABASE_URL=sqlite:///./fpl_bot.db
+      - ML_SERVICE_URL=http://ml-prediction-service:8002
+      - FPL_API_SERVICE_URL=http://fpl-api-service:8001
+    ports:
+      - "8003:8003"
+    volumes:
+      - ./fpl_bot.db:/app/fpl_bot.db
+    restart: unless-stopped
+    networks:
+      - fpl-network
+
+  # FastAPI dashboard backend
+  dashboard-api:
+    build: .
+    container_name: fpl-dashboard-api
+    depends_on:
+      init-db:
+        condition: service_completed_successfully
+    command: python -m uvicorn dashboard.main:app --host 0.0.0.0 --port 8000
+    environment:
+      - DATABASE_URL=sqlite:///./fpl_bot.db
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./fpl_bot.db:/app/fpl_bot.db
+    restart: unless-stopped
+    networks:
+      - fpl-network
+
+  # React dashboard frontend
+  dashboard-react:
+    build:
+      context: .
+      dockerfile: Dockerfile.react
+      args:
+        - REACT_APP_API_URL=http://localhost:8000
+    container_name: fpl-dashboard-react
+    depends_on:
+      - dashboard-api
+    ports:
+      - "3000:80"
+    restart: unless-stopped
+    networks:
+      - fpl-network
+
+  # PostgreSQL database (optional, for better performance)
+  postgres:
+    image: postgres:15-alpine
+    container_name: fpl-postgres
+    environment:
+      - POSTGRES_DB=fpl_bot
+      - POSTGRES_USER=fpl_user
+      - POSTGRES_PASSWORD=fpl_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+    networks:
+      - fpl-network
+    profiles:
+      - postgres
+
+volumes:
+  postgres_data:
+
+
+networks:
+  fpl-network:
+    driver: bridge

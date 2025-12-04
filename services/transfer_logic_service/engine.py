@@ -1,74 +1,75 @@
 import logging
 from typing import List, Dict, Any, Optional
 from sqlalchemy.orm import Session
-from config.database import PlayerPerformance, TransferHistory
-from services.ml_predictor import MLPredictor
-from services.fpl_api import FPLAPI
+from sqlalchemy import create_engine
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
+import httpx # For making HTTP requests to other services
+
+# This is a temporary solution for the database connection.
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./fpl_bot.db")
+engine = create_engine(DATABASE_URL)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+# Import necessary models from config.database (once moved to shared library or each service has its own models)
+from config.database import TransferHistory # Placeholder for now
 
 logger = logging.getLogger(__name__)
 
 class TransferEngine:
     """Handles transfer decisions for the FPL bot"""
     
-    def __init__(self, db: Session):
+    def __init__(self, db: Session, ml_service_url: str, fpl_api_service_url: str):
         self.budget_buffer = 0.5  # Keep some money in reserve
         self.db = db
-        self.ml_predictor = MLPredictor()
-        self.ml_predictor.train_model(db)
+        self.ml_service_url = ml_service_url
+        self.fpl_api_service_url = fpl_api_service_url
     
-    def calculate_expected_points(self, player_data: Dict[str, Any], fixture_difficulty: int = 3) -> float:
-        """Calculate expected points for a player based on recent performance and fixtures"""
+    async def calculate_expected_points(self, player_data: Dict[str, Any], fixture_difficulty: int = 3) -> float:
+        """Calculate expected points for a player by calling the ML Prediction Service."""
         try:
-            # Try to use ML prediction first
-            if self.ml_predictor.is_trained:
-                predicted_points = self.ml_predictor.predict_performance(player_data, fixture_difficulty)
-                return predicted_points
-            
-            # Fallback to simple calculation if ML not available
-            # Get recent points (last 3 games)
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    f"{self.ml_service_url}/predict",
+                    json={"stats": player_data, "opponent_difficulty": fixture_difficulty}
+                )
+                response.raise_for_status()
+                return response.json().get("predicted_points", 0.0)
+        except httpx.HTTPStatusError as e:
+            logger.error(f"Error calling ML Prediction Service: {e.response.status_code} - {e.response.text}")
+            # Fallback to simple calculation if ML service is unavailable or errors
             history = player_data.get('history', [])
             if not history:
                 return 0
-            
             recent_points = [game['total_points'] for game in history[-3:] if 'total_points' in game]
-            if not recent_points:
-                return 0
-                
-            avg_points = sum(recent_points) / len(recent_points)
-            
-            # Adjust based on fixture difficulty
-            # 1 = easiest, 5 = hardest
-            difficulty_multiplier = 1.2 - (fixture_difficulty - 3) * 0.1  # Scale from 0.8 to 1.2
-            expected_points = avg_points * difficulty_multiplier
-            
-            return expected_points
+            avg_points = sum(recent_points) / len(recent_points) if recent_points else 0
+            difficulty_multiplier = 1.2 - (fixture_difficulty - 3) * 0.1
+            return avg_points * difficulty_multiplier
         except Exception as e:
-            logger.error(f"Error calculating expected points: {str(e)}")
+            logger.error(f"Unexpected error in calculate_expected_points: {str(e)}")
             return 0
     
     def is_player_available(self, player: Dict[str, Any]) -> bool:
-        """Check if player is available (not injured or suspended) - improved version"""
+        """Check if player is available (not injured or suspended)"""
         try:
-            # Get status with proper None handling
             status = player.get('status')
             if status is None:
-                status = 'a'  # Default to available if status is missing
+                status = 'a'
             
-            # 'a' = available, 'i' = injured, 's' = suspended, 'u' = unavailable
             if status != 'a':
                 logger.debug(f"Player {player.get('web_name', 'Unknown')} is not available (status: {status})")
                 return False
             
-            # Check chance of playing next round
             chance_next = player.get('chance_of_playing_next_round')
-            if chance_next is not None and chance_next < 75:  # Less than 75% chance
+            if chance_next is not None and chance_next < 75:
                 logger.debug(f"Player {player.get('web_name', 'Unknown')} has low chance of playing ({chance_next}%)")
                 return False
                 
             return True
         except Exception as e:
             logger.error(f"Error checking player availability: {str(e)}")
-            return True  # Assume available if error
+            return True
     
     def calculate_player_value(self, player: Dict[str, Any], fixture_difficulty: int = 3) -> float:
         """Calculate value score for a player (points per million)"""
@@ -77,8 +78,11 @@ class TransferEngine:
             if price <= 0:
                 return 0
             
-            expected_points = self.calculate_expected_points(player, fixture_difficulty)
-            value = expected_points / (price / 10)  # Points per million
+            # This will need to be an async call in an async context
+            # For now, it will be called in identify_transfer_targets which is async
+            # In a real microservice, this might be handled via message passing or a direct call
+            expected_points = player.get('expected_points_from_ml', 0) # Assumed to be pre-calculated
+            value = expected_points / (price / 10)
             
             return value
         except Exception as e:
@@ -87,44 +91,50 @@ class TransferEngine:
     
     async def identify_transfer_targets(self, current_squad: List[Dict], 
                                 available_players: List[Dict], 
-                                budget: float, 
-                                api: Optional[FPLAPI] = None) -> List[Dict]:
+                                budget: float) -> List[Dict]:
         """Identify potential transfer targets with sophisticated analysis"""
         try:
             logger.info("Starting transfer target identification...")
             
-            # Get current gameweek for fixture analysis
-            current_gw = 13  # Default, would normally get from API
-            if api:
-                bootstrap_data = await api.get_bootstrap_data()
-                if bootstrap_data:
-                    events = bootstrap_data.get('events', [])
-                    for event in events:
-                        if event.get('is_current'):
-                            current_gw = event.get('id')
-                            break
+            # Fetch bootstrap data from FPL API Service
+            async with httpx.AsyncClient() as client:
+                bootstrap_response = await client.get(f"{self.fpl_api_service_url}/bootstrap")
+                bootstrap_response.raise_for_status()
+                bootstrap_data = bootstrap_response.json()
+            
+            events = bootstrap_data.get('events', [])
+            current_gw = None
+            for event in events:
+                if event.get('is_current'):
+                    current_gw = event.get('id')
+                    break
+            if not current_gw:
+                for event in events:
+                    if event.get('is_next'):
+                        current_gw = event.get('id')
+                        break
+            if not current_gw:
+                current_gw = 1 # Fallback
             
             # Calculate value and expected points for each player
             logger.info(f"Analyzing {len(available_players)} available players...")
             player_values = []
-            processed_count = 0
             
             for player in available_players:
-                processed_count += 1
-                if processed_count % 100 == 0:
-                    logger.debug(f"Processed {processed_count}/{len(available_players)} players")
-                
-                # Skip injured/suspended players
                 if not self.is_player_available(player):
                     continue
                 
-                # Get fixture difficulty for player's team
+                # Get fixture difficulty from FPL API Service
                 team_id = player.get('team', 0)
-                fixture_difficulty = 3  # Default
-                if api and team_id:
-                    fixture_difficulty = await api.get_fixture_difficulty(team_id, current_gw)
+                async with httpx.AsyncClient() as client:
+                    difficulty_response = await client.get(f"{self.fpl_api_service_url}/fixture-difficulty/{team_id}/{current_gw}")
+                    difficulty_response.raise_for_status()
+                    fixture_difficulty = difficulty_response.json().get("difficulty", 3)
                 
-                expected_points = self.calculate_expected_points(player, fixture_difficulty)
+                # Call ML Prediction Service for expected points
+                expected_points = await self.calculate_expected_points(player, fixture_difficulty)
+                player['expected_points_from_ml'] = expected_points # Attach for value calculation
+                
                 value = self.calculate_player_value(player, fixture_difficulty)
                 
                 player_values.append({
@@ -143,12 +153,16 @@ class TransferEngine:
             logger.info(f"Analyzing {len(current_squad)} squad players...")
             squad_analysis = []
             for player in current_squad:
+                # Need to get fixture difficulty and expected points for current squad players too
                 team_id = player.get('team', 0)
-                fixture_difficulty = 3  # Default
-                if api and team_id:
-                    fixture_difficulty = await api.get_fixture_difficulty(team_id, current_gw)
-                
-                expected_points = self.calculate_expected_points(player, fixture_difficulty)
+                async with httpx.AsyncClient() as client:
+                    difficulty_response = await client.get(f"{self.fpl_api_service_url}/fixture-difficulty/{team_id}/{current_gw}")
+                    difficulty_response.raise_for_status()
+                    fixture_difficulty = difficulty_response.json().get("difficulty", 3)
+
+                expected_points = await self.calculate_expected_points(player, fixture_difficulty)
+                player['expected_points_from_ml'] = expected_points
+
                 value = self.calculate_player_value(player, fixture_difficulty)
                 
                 squad_analysis.append({
@@ -171,7 +185,6 @@ class TransferEngine:
                 player_price = weakest_player.get('now_cost', 0)
                 available_budget = budget + player_price - self.budget_buffer * 10
                 
-                # Find better valued players of the same position within budget
                 better_players = [
                     pv for pv in player_values 
                     if (pv['player'].get('element_type') == position and 
@@ -181,7 +194,6 @@ class TransferEngine:
                 ]
                 
                 if better_players:
-                    # Sort by value improvement
                     better_players.sort(key=lambda x: x['value'] - weakest_value, reverse=True)
                     best_target = better_players[0]
                     
@@ -193,10 +205,9 @@ class TransferEngine:
                         'reason': f"Better value ({best_target['value']:.2f} vs {weakest_value:.2f}), Difficulty: {best_target['fixture_difficulty']} vs {weakest['fixture_difficulty']}"
                     })
             
-            # Sort by gain
             transfers.sort(key=lambda x: x['gain'], reverse=True)
             logger.info(f"Identified {len(transfers)} potential transfers")
-            return transfers[:2]  # Return top 2 transfers
+            return transfers[:2]
         except Exception as e:
             logger.error(f"Error identifying transfer targets: {str(e)}", exc_info=True)
             return []
@@ -204,6 +215,8 @@ class TransferEngine:
     def record_transfer(self, transfer_data: Dict):
         """Record transfer in database for performance tracking"""
         try:
+            # Need to get PlayerPerformance from a shared model or data service
+            from config.database import TransferHistory # Placeholder for now
             transfer_record = TransferHistory(
                 player_out_id=transfer_data['out']['id'],
                 player_in_id=transfer_data['in']['id'],
@@ -217,3 +230,10 @@ class TransferEngine:
         except Exception as e:
             logger.error(f"Error recording transfer: {str(e)}")
             self.db.rollback()
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()

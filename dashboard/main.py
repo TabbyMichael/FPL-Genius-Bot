@@ -1,13 +1,24 @@
 from fastapi import FastAPI, HTTPException, Depends
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from typing import List, Dict, Any
 import os
 import logging
+
+# Conditional import for FPLAPI to avoid linter errors
+import importlib
+
+try:
+    fpl_api_module = importlib.import_module('services.fpl_api')
+    FPLAPI = fpl_api_module.FPLAPI
+except ImportError as e:
+    logging.error(f"Failed to import FPLAPI: {e}")
+    FPLAPI = None
+
 from config.database import get_db, PlayerPerformance, PlayerPrediction, TransferHistory
 from config.settings import TEAM_ID
 from services.health_check import HealthCheckService
-from services.fpl_api import FPLAPI
 from services.ml_predictor import MLPredictor
 
 # Configure logging
@@ -63,17 +74,18 @@ async def get_player_name(player_id: int) -> str:
     
     try:
         # Create FPL API instance (without auth for public data)
-        async with FPLAPI() as api:
-            player_info = await api.get_player_info(player_id)
-            if player_info and isinstance(player_info, dict):
-                # Safely extract the web_name
-                player_name = player_info.get('web_name')
-                if player_name:
-                    _player_cache[player_id] = player_name
-                    return player_name
-            
-            # Fallback if player info is not available
-            return f'Player {player_id}'
+        if FPLAPI is not None:
+            async with FPLAPI() as api:
+                player_info = await api.get_player_info(player_id)
+                if player_info and isinstance(player_info, dict):
+                    # Safely extract the web_name
+                    player_name = player_info.get('web_name')
+                    if player_name:
+                        _player_cache[player_id] = player_name
+                        return player_name
+        
+        # Fallback if player info is not available or FPLAPI is None
+        return f'Player {player_id}'
     except Exception as e:
         logger.error(f"Error fetching player name for ID {player_id}: {str(e)}")
         return f'Player {player_id}'

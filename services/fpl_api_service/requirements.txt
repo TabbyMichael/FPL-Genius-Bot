@@ -1,0 +1,6 @@
+# requirements.txt for fpl-api-service
+fastapi
+uvicorn
+aiohttp
+playwright
+tenacity

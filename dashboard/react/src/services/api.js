@@ -31,4 +31,16 @@ export const fetchAnalyticsSummary = () => {
   return api.get('/analytics/summary');
 };
 
+export const fetchSystemLogs = (lines = 100) => {
+  return api.get(`/system/logs?lines=${lines}`);
+};
+
+export const triggerBotRun = () => {
+  return api.post('/system/run');
+};
+
+export const fetchFeatureImportance = () => {
+  return api.get('/ml/feature-importance');
+};
+
 export default api;

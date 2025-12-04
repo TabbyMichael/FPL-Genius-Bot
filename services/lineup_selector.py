@@ -1,5 +1,5 @@
 import logging
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from services.ml_predictor import MLPredictor
 
 logger = logging.getLogger(__name__)
@@ -20,7 +20,7 @@ class LineupSelector:
         if db_session:
             self.ml_predictor.train_model(db_session)
     
-    def select_captain(self, squad: List[Dict]) -> Dict:
+    def select_captain(self, squad: List[Dict]) -> Optional[Dict]:
         """Select captain based on expected points"""
         try:
             best_player = None
@@ -42,7 +42,7 @@ class LineupSelector:
             return best_player
         except Exception as e:
             logger.error(f"Error selecting captain: {str(e)}")
-            return squad[0] if squad else None
+            return squad[0] if squad and len(squad) > 0 else None
     
     def select_lineup(self, squad: List[Dict]) -> List[Dict]:
         """Select starting XI from squad"""
