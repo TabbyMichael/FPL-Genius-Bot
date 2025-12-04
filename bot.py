@@ -33,7 +33,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # RabbitMQ configuration
-RABBITMQ_URL = os.getenv("RABBITMQ_URL", "amqp://guest:guest@rabbitmq:5672/")
+RABBITMQ_URL = os.getenv("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/")
+
 
 class RabbitMQClient:
     def __init__(self, amqp_url: str):

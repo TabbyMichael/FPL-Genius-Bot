@@ -16,7 +16,9 @@ services:
 
   # Database initialization service (runs once)
   init-db:
-    build: .
+    build:
+      context: .
+      dockerfile: Docker/Dockerfile
     container_name: fpl-init-db
     command: python init_db.py
     environment:
@@ -29,7 +31,9 @@ services:
 
   # FastAPI dashboard backend
   dashboard-api:
-    build: .
+    build:
+      context: .
+      dockerfile: Docker/Dockerfile
     container_name: fpl-dashboard-api
     depends_on:
       rabbitmq:

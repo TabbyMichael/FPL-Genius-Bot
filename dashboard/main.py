@@ -10,7 +10,7 @@ import logging
 import importlib
 
 try:
-    fpl_api_module = importlib.import_module('services.fpl_api')
+    fpl_api_module = importlib.import_module('services.fpl_api_service')
     FPLAPI = fpl_api_module.FPLAPI
 except ImportError as e:
     logging.error(f"Failed to import FPLAPI: {e}")
