@@ -14,6 +14,8 @@ An advanced Fantasy Premier League (FPL) bot that automatically analyzes top per
 - **Health Monitoring**: Built-in health checks for API, database, and ML model status
 - **Comprehensive Testing**: Full test suite with pytest
 
+![TradeZella Banner](/dashboard/react/public/assets/1.png)
+
 ## Project Structure
 
 ```
@@ -93,6 +95,7 @@ DATABASE_URL=sqlite:///./fpl_bot.db
 ```bash
 # The database is automatically initialized when the bot runs
 ```
+dashboard/react/public/assets/2.png
 
 ## Security Best Practices
 
@@ -134,6 +137,7 @@ LOG_FILE=logs/fpl_bot.log
 # ML Model Settings
 ML_TRAINING_DATA_MIN=50
 ```
+dashboard/react/public/assets/3.png
 
 ## Usage
 
@@ -193,6 +197,8 @@ Tables:
 - `player_performance`: Tracks player performance data
 - `player_predictions`: Stores ML predictions
 - `transfer_history`: Records transfer decisions
+
+dashboard/react/public/assets/4.png
 
 ## Machine Learning
 
